@@ -25,7 +25,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import (
     VietnameseCharsTokenizer,
 )
 from nemo.collections.tts.g2p.models.i18n_ipa import IpaG2p
-from nemo.collections.tts.g2p.models.ja_jp_ipa import JapaneseG2p
+from nemo.collections.tts.g2p.models.ja_jp_ipa import JapaneseG2p, JapaneseProsodyG2p
 
 
 class TestTTSTokenizers:
@@ -281,5 +281,20 @@ class TestTTSTokenizers:
 
         tokenizer = JapanesePhonemeTokenizer(g2p=g2p)
         chars, tokens = self._parse_text(tokenizer, input_text)
+
+        assert chars == expected_output
+
+    @pytest.mark.run_only_on('CPU')
+    @pytest.mark.unit
+    def test_japanese_prosody_g2p(self):
+        input_text = "です"
+        expected_output = "^de]sU$"
+        
+        g2p = JapaneseProsodyG2p(drop_unvoiced_vowels=False)
+        tokenizer = JapanesePhonemeTokenizer(g2p=g2p, punct=False)
+        chars, tokens = self._parse_text(tokenizer, input_text)
+
+        # Verify tokenizer can encode/decode
+        assert len(tokens) > 0, "Should have tokens"
 
         assert chars == expected_output

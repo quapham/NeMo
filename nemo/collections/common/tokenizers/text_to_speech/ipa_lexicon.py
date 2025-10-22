@@ -139,6 +139,8 @@ IPA_CHARACTER_SETS = {
         'ð', 'ø', 'ʁ', 'ts', 'tʃ', 'dʒ', 'y', 'dʑ', 't͡s',
         'ɑ̃', 'ĩ', 'ũ', 'ẽ', 'õ', 'ɑ̃', 'ĩ', 'ũ', 'w̃',  
         'ẽ', 'õ', 'hʲ', 'ɪ', 'ː', 'o̞', 'e̞', 
+        'pau', 'cl', 'sil', 'ny', 'ry', 'gy', 'by', 'py', 'my', 'ky', 'sh', 'ch','hy','dy','ty',
+        'A', 'I', 'U', 'E', 'O',
     ),
 }
 
@@ -295,6 +297,9 @@ def get_ipa_punctuation_list(locale):
                 '〽',
                 '〓',
                 '〒',
+                '！', 
+                '？',
+                '・',
             ]
         )
     punct_list = sorted(list(punct_set))

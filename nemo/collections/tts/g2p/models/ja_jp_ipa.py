@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import pathlib
+import re
+import pyopenjtalk
+
 from collections import defaultdict
 from typing import Dict, List, Optional, Union
 
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
     get_grapheme_character_set,
     get_ipa_punctuation_list,
+    IPA_CHARACTER_SETS,
 )
 from nemo.collections.tts.g2p.models.base import BaseG2p
 from nemo.collections.tts.g2p.utils import set_grapheme_case
@@ -151,3 +155,124 @@ class JapaneseG2p(BaseG2p):
                 logging.warning(f"{word} not found in the pronunciation dictionary. Returning graphemes instead.")
                 phoneme_seq += [c for c in word]
         return phoneme_seq
+
+
+class JapaneseProsodyG2p(BaseG2p):
+    """Japanese G2P module with prosody symbols using pyopenjtalk.
+    Converts text to phonemes with prosody symbols for expressive TTS.
+    This implementation is based on ESPnet's pyopenjtalk_g2p_prosody function:
+    https://github.com/espnet/espnet/blob/master/espnet2/text/phoneme_tokenizer.py
+    
+    Original ESPnet code is licensed under Apache-2.0 license:
+    ESPnet: https://github.com/espnet/espnet
+    Prosody symbols:
+        ^ : Start of utterance
+        $ : End of utterance (statement)
+        ? : End of utterance (question)
+        [ : Pitch rising
+        ] : Pitch falling
+        # : Accent phrase boundary
+        _ : Pause
+    Args:
+        drop_unvoiced_vowels (bool): Convert unvoiced vowels (A,E,I,O,U) to lowercase. Default: True.
+    Examples:
+        >>> g2p = JapaneseProsodyG2p()
+        >>> g2p("こんにちは。")
+        ['^', 'k', 'o', '[', 'N', 'n', 'i', 'ch', 'i', 'w', 'a', '$']
+    """
+    
+    def __init__(
+        self,
+        drop_unvoiced_vowels: bool = True,
+        word_tokenize_func=None,
+        apply_to_oov_word=None,
+        mapping_file: Optional[str] = None,
+    ):
+        if pyopenjtalk is None:
+            raise ImportError("pyopenjtalk is required. Install with: pip install pyopenjtalk")
+        
+        self.drop_unvoiced_vowels = drop_unvoiced_vowels
+        
+        # Phoneme list includes IPA chars + prosody symbols
+        ja_ipa_chars = IPA_CHARACTER_SETS.get("ja-JP", [])
+        prosody_symbols = ['^', '$', '?', '[', ']', '#', '_']
+        self.phoneme_list = sorted(list(ja_ipa_chars) + prosody_symbols)
+        
+        self.ascii_letter_list = []
+        self.punctuation = get_ipa_punctuation_list('ja-JP')
+        
+        super().__init__(
+            word_tokenize_func=word_tokenize_func,
+            apply_to_oov_word=apply_to_oov_word,
+            mapping_file=mapping_file,
+        )
+    
+    def __call__(self, text: str) -> List[str]:
+        """Convert text to phoneme + prosody symbol sequence.
+        Args:
+            text (str): Input Japanese text.
+        Returns:
+            List[str]: List of phonemes and prosody symbols.
+        """
+        try:
+            labels = pyopenjtalk.make_label(pyopenjtalk.run_frontend(text))
+            N = len(labels)
+            phones = []
+            
+            for n in range(N):
+                lab_curr = labels[n]
+                
+                # Extract current phoneme
+                p3 = re.search(r"\-(.*?)\+", lab_curr).group(1)
+                
+                # Handle unvoiced vowels
+                if self.drop_unvoiced_vowels and p3 in "AEIOU":
+                    p3 = p3.lower()
+                
+                # Handle silence at beginning and end
+                if p3 == "sil":
+                    assert n == 0 or n == N - 1, f"sil found at unexpected position {n}"
+                    if n == 0:
+                        phones.append("^")
+                    elif n == N - 1:
+                        # Check if question or statement
+                        e3 = self._numeric_feature_by_regex(r"!(\d+)_", lab_curr)
+                        if e3 == 0:
+                            phones.append("$")  # Statement
+                        elif e3 == 1:
+                            phones.append("?")
+                    continue
+                elif p3 == "pau":
+                    phones.append("_")  
+                    continue
+                else:
+                    phones.append(p3)
+                
+                # Extract accent information (forward or backward)
+                a1 = self._numeric_feature_by_regex(r"/A:([0-9\-]+)\+", lab_curr)
+                a2 = self._numeric_feature_by_regex(r"\+(\d+)\+", lab_curr)
+                a3 = self._numeric_feature_by_regex(r"\+(\d+)/", lab_curr)
+                f1 = self._numeric_feature_by_regex(r"/F:(\d+)_", lab_curr)  # number of mora in accent phrase
+                
+                # Look ahead to next phoneme
+                if n + 1 < N:
+                    a2_next = self._numeric_feature_by_regex(r"\+(\d+)\+", labels[n + 1])
+                    
+                    if a3 == 1 and a2_next == 1 and p3 in "aeiouAEIOUNcl":
+                        phones.append("#")  # Accent phrase boundary
+                    elif a1 == 0 and a2_next == a2 + 1 and a2 != f1:
+                        phones.append("]")  # Pitch falling
+                    elif a2 == 1 and a2_next == 2:
+                        phones.append("[")  # Pitch rising
+            
+            return phones
+            
+        except Exception as e:
+            logging.error(f"Failed to convert text to prosody: {e}")
+            raise RuntimeError(f"G2P prosody conversion failed: {e}")
+    
+    @staticmethod
+    def _numeric_feature_by_regex(regex: str, s: str) -> int:
+        """Extract numeric feature from label using regex."""
+        match = re.search(regex, s)
+        return int(match.group(1)) if match else -50
