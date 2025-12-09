@@ -15,6 +15,7 @@
 import pathlib
 import re
 import pyopenjtalk
+import unicodedata
 
 from collections import defaultdict
 from typing import Dict, List, Optional, Union
@@ -22,7 +23,7 @@ from typing import Dict, List, Optional, Union
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
     get_grapheme_character_set,
     get_ipa_punctuation_list,
-    IPA_CHARACTER_SETS,
+    GRAPHEME_CHARACTER_SETS,
 )
 from nemo.collections.tts.g2p.models.base import BaseG2p
 from nemo.collections.tts.g2p.utils import set_grapheme_case
@@ -157,48 +158,54 @@ class JapaneseG2p(BaseG2p):
         return phoneme_seq
 
 
-class JapaneseProsodyG2p(BaseG2p):
-    """Japanese G2P module with prosody symbols using pyopenjtalk.
-    Converts text to phonemes with prosody symbols for expressive TTS.
-    This implementation is based on ESPnet's pyopenjtalk_g2p_prosody function:
-    https://github.com/espnet/espnet/blob/master/espnet2/text/phoneme_tokenizer.py
+class JapaneseKanaAccent(BaseG2p):
+    """Japanese G2P module that converts text to Kana with pitch accent markers.
     
-    Original ESPnet code is licensed under Apache-2.0 license:
-    ESPnet: https://github.com/espnet/espnet
-    Prosody symbols:
-        ^ : Start of utterance
-        $ : End of utterance (statement)
-        ? : End of utterance (question)
-        [ : Pitch rising
-        ] : Pitch falling
-        # : Accent phrase boundary
-        _ : Pause
-    Args:
-        drop_unvoiced_vowels (bool): Convert unvoiced vowels (A,E,I,O,U) to lowercase. Default: True.
-    Examples:
-        >>> g2p = JapaneseProsodyG2p()
-        >>> g2p("こんにちは。")
-        ['^', 'k', 'o', '[', 'N', 'n', 'i', 'ch', 'i', 'w', 'a', '$']
+    Converts Japanese text to katakana with pitch accent (0=low, 1=high) before each mora.
+    Implements Japanese pitch accent rules for entire word chains.
+    
+    Japanese pitch accent rules:
+    - acc=0 (Heiban 平板): L-H-H-H... (first mora low, rest high)
+    - acc=1 (Atamadaka 頭高): H-L-L-L... (first mora high, rest low)
+    - acc=N (2 ≤ N < mora count, Nakadaka 中高): L-H-H...-H-L... (low, then high, drops after Nth mora)
+    - acc=N (N >= mora count, Odaka 尾高): L-H-H-H (drop at end or after)
+    
+    chain_flag handling:
+    - chain_flag=0 or -1: Start of new word chain (use this word's acc)
+    - chain_flag=1: Continuation of chain (ignore this word's acc)
+    - Entire chain treated as single word with first word's acc and total mora count
+    
+    Output format: [pitch, kana_char(s), pitch, kana_char(s), ...] where pitch (0/1) precedes each mora
     """
     
     def __init__(
         self,
-        drop_unvoiced_vowels: bool = True,
+        ascii_letter_prefix: str = "",
+        ascii_letter_case: str = "lower",
         word_tokenize_func=None,
         apply_to_oov_word=None,
         mapping_file: Optional[str] = None,
+        foreign_acc_ja: bool = False,
     ):
         if pyopenjtalk is None:
             raise ImportError("pyopenjtalk is required. Install with: pip install pyopenjtalk")
+        if ascii_letter_prefix is None:
+            ascii_letter_prefix = ""
+            
+        self.foreign_acc_ja = foreign_acc_ja
+        self.ascii_letter_case = ascii_letter_case
+        # Load Japanese katakana grapheme set
+        ja_graphemes = GRAPHEME_CHARACTER_SETS.get("ja-JP", [])
+
+        pitch_markers = ['0', '1']
+        self.phoneme_list = sorted(list(ja_graphemes) + pitch_markers)
         
-        self.drop_unvoiced_vowels = drop_unvoiced_vowels
-        
-        # Phoneme list includes IPA chars + prosody symbols
-        ja_ipa_chars = IPA_CHARACTER_SETS.get("ja-JP", [])
-        prosody_symbols = ['^', '$', '?', '[', ']', '#', '_']
-        self.phoneme_list = sorted(list(ja_ipa_chars) + prosody_symbols)
-        
-        self.ascii_letter_list = []
+        # ASCII letters handling
+        self.ascii_letter_dict = {
+            x: ascii_letter_prefix + x for x in get_grapheme_character_set(locale="en-US", case=ascii_letter_case)
+        }
+        self.ascii_letter_list = sorted(self.ascii_letter_dict)
+
         self.punctuation = get_ipa_punctuation_list('ja-JP')
         
         super().__init__(
@@ -207,72 +214,135 @@ class JapaneseProsodyG2p(BaseG2p):
             mapping_file=mapping_file,
         )
     
-    def __call__(self, text: str) -> List[str]:
-        """Convert text to phoneme + prosody symbol sequence.
-        Args:
-            text (str): Input Japanese text.
-        Returns:
-            List[str]: List of phonemes and prosody symbols.
-        """
-        try:
-            labels = pyopenjtalk.make_label(pyopenjtalk.run_frontend(text))
-            N = len(labels)
-            phones = []
-            
-            for n in range(N):
-                lab_curr = labels[n]
-                
-                # Extract current phoneme
-                p3 = re.search(r"\-(.*?)\+", lab_curr).group(1)
-                
-                # Handle unvoiced vowels
-                if self.drop_unvoiced_vowels and p3 in "AEIOU":
-                    p3 = p3.lower()
-                
-                # Handle silence at beginning and end
-                if p3 == "sil":
-                    assert n == 0 or n == N - 1, f"sil found at unexpected position {n}"
-                    if n == 0:
-                        phones.append("^")
-                    elif n == N - 1:
-                        # Check if question or statement
-                        e3 = self._numeric_feature_by_regex(r"!(\d+)_", lab_curr)
-                        if e3 == 0:
-                            phones.append("$")  # Statement
-                        elif e3 == 1:
-                            phones.append("?")
-                    continue
-                elif p3 == "pau":
-                    phones.append("_")  
-                    continue
-                else:
-                    phones.append(p3)
-                
-                # Extract accent information (forward or backward)
-                a1 = self._numeric_feature_by_regex(r"/A:([0-9\-]+)\+", lab_curr)
-                a2 = self._numeric_feature_by_regex(r"\+(\d+)\+", lab_curr)
-                a3 = self._numeric_feature_by_regex(r"\+(\d+)/", lab_curr)
-                f1 = self._numeric_feature_by_regex(r"/F:(\d+)_", lab_curr)  # number of mora in accent phrase
-                
-                # Look ahead to next phoneme
-                if n + 1 < N:
-                    a2_next = self._numeric_feature_by_regex(r"\+(\d+)\+", labels[n + 1])
-                    
-                    if a3 == 1 and a2_next == 1 and p3 in "aeiouAEIOUNcl":
-                        phones.append("#")  # Accent phrase boundary
-                    elif a1 == 0 and a2_next == a2 + 1 and a2 != f1:
-                        phones.append("]")  # Pitch falling
-                    elif a2 == 1 and a2_next == 2:
-                        phones.append("[")  # Pitch rising
-            
-            return phones
-            
-        except Exception as e:
-            logging.error(f"Failed to convert text to prosody: {e}")
-            raise RuntimeError(f"G2P prosody conversion failed: {e}")
-    
     @staticmethod
-    def _numeric_feature_by_regex(regex: str, s: str) -> int:
-        """Extract numeric feature from label using regex."""
-        match = re.search(regex, s)
-        return int(match.group(1)) if match else -50
+    def _split_katakana_to_moras(katakana: str) -> List[str]:
+        """Split Mora pattern: [main_katakana][small_katakana]? | [standalone_small] | [choonpu]"""
+        mora_pattern = r'[ア-ンヴ][ャュョァィゥェォヮ]?|[ァィゥェォヵヶッャュョヮ]|ー'
+        return re.findall(mora_pattern, katakana)
+
+    def _get_pitch_pattern(self, acc: int, total_mora: int) -> List[int]:
+        """Calculate pitch pattern for entire word chain.
+        
+        Args:
+            acc: Accent nucleus position from first word in chain
+            total_mora: Total mora count of entire chain
+            
+        Returns:
+            List of pitch values (0=low, 1=high) for each mora
+        """
+        if total_mora == 0:
+            return []
+        
+        if acc == 0:  # Heiban: L-H-H-H...
+            return [0] + [1] * (total_mora - 1)
+        
+        if acc == 1:  # Atamadaka: H-L-L-L...
+            return [1] + [0] * (total_mora - 1)
+        
+        if acc >= total_mora:  # Odaka: L-H-H-H
+            return [0] + [1] * (total_mora - 1)
+        
+        # Nakadaka: L-H...H-L...L (drop after acc-th mora)
+        return [0] + [1] * (acc - 1) + [0] * (total_mora - acc)
+    
+    def _process_chain(self, chain: List[Dict], result: List[str]) -> None:
+        if not chain:
+            return
+        
+        # Find chain starter
+        chain_starter_idx = 0
+        for i, word in enumerate(chain):
+            if word['chain_flag'] != 1:
+                chain_starter_idx = i
+                break
+        
+        chain_acc = chain[chain_starter_idx]['acc']
+        
+        # Split all words into moras
+        all_moras = []
+        for word in chain:
+            moras = self._split_katakana_to_moras(word['pron'])
+            all_moras.extend(moras)
+        
+        # Calculate pitch pattern using chain starter's accent
+        total_mora = len(all_moras)
+        pitch_pattern = self._get_pitch_pattern(chain_acc, total_mora)
+        
+        # Build output
+        for mora, pitch in zip(all_moras, pitch_pattern):
+            result.append(str(pitch))
+            result.extend(mora)
+                
+    def __call__(self, text: str) -> List[str]:
+        """Convert Japanese text to kana with pitch accent markers."""
+        text = set_grapheme_case(text, case=self.ascii_letter_case)
+        
+        # njd (Nihongo Jisho Data): List of word dictionaries with linguistic features
+        njd = pyopenjtalk.run_frontend(text)
+        
+        result = []
+        current_chain = []
+        punctuation = self.punctuation  
+        
+        for idx, word in enumerate(njd):
+            if not isinstance(word, dict):
+                continue
+            
+            pron = word.get('pron', '')
+            pos = word.get('pos', '')
+            string = word.get('string', '')
+            chain_flag = word.get('chain_flag', 0)
+            mora_size = word.get('mora_size', 0)
+            acc = word.get('acc', 0)
+            
+            string = unicodedata.normalize('NFKC', string)
+
+            # Handle English letters
+            if string and all(c in self.ascii_letter_dict for c in string):
+                if current_chain:
+                    self._process_chain(current_chain, result)
+                    current_chain = []
+                
+                result.extend(list(string))
+                continue
+
+            # Handle punctuation
+            if pos in ('記号', '補助記号'):
+                if current_chain:
+                    self._process_chain(current_chain, result)
+                    current_chain = []
+                if string.isspace():
+                    result.append(' ')
+                elif string in punctuation:
+                    result.append(string)
+                continue
+
+            if not pron or mora_size == 0:
+                continue
+
+            # Add word to current chain
+            current_chain.append({
+                'pron': pron,
+                'acc': acc,
+                'mora_size': mora_size,
+                'chain_flag': chain_flag,
+            })
+            
+            # Check if next word continues chain 
+            next_has_chain = (
+                idx + 1 < len(njd) and 
+                isinstance(njd[idx + 1], dict) and 
+                njd[idx + 1].get('chain_flag', 0) == 1
+            )
+            
+            # If next word doesn't continue chain, process current chain
+            if not next_has_chain:
+                self._process_chain(current_chain, result)
+                current_chain = []
+        
+        # Process any remaining chain
+        if current_chain:
+            self._process_chain(current_chain, result)
+        return result
+        
+    
