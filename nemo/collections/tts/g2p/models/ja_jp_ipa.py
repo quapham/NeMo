@@ -14,7 +14,6 @@
 
 import pathlib
 import re
-import pyopenjtalk
 import unicodedata
 
 from collections import defaultdict
@@ -28,7 +27,10 @@ from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
 from nemo.collections.tts.g2p.models.base import BaseG2p
 from nemo.collections.tts.g2p.utils import set_grapheme_case
 from nemo.utils import logging
-
+try:
+    import pyopenjtalk
+except ImportError:
+    pyopenjtalk = None
 
 class JapaneseG2p(BaseG2p):
     def __init__(
@@ -158,7 +160,7 @@ class JapaneseG2p(BaseG2p):
         return phoneme_seq
 
 
-class JapaneseKanaAccent(BaseG2p):
+class JapaneseKatakanaAccentG2p(BaseG2p):
     """Japanese G2P module that converts text to Kana with pitch accent markers.
     
     Converts Japanese text to katakana with pitch accent (0=low, 1=high) before each mora.
@@ -185,14 +187,12 @@ class JapaneseKanaAccent(BaseG2p):
         word_tokenize_func=None,
         apply_to_oov_word=None,
         mapping_file: Optional[str] = None,
-        foreign_acc_ja: bool = False,
     ):
         if pyopenjtalk is None:
             raise ImportError("pyopenjtalk is required. Install with: pip install pyopenjtalk")
         if ascii_letter_prefix is None:
             ascii_letter_prefix = ""
             
-        self.foreign_acc_ja = foreign_acc_ja
         self.ascii_letter_case = ascii_letter_case
         # Load Japanese katakana grapheme set
         ja_graphemes = GRAPHEME_CHARACTER_SETS.get("ja-JP", [])
@@ -274,7 +274,11 @@ class JapaneseKanaAccent(BaseG2p):
             result.extend(mora)
                 
     def __call__(self, text: str) -> List[str]:
-        """Convert Japanese text to kana with pitch accent markers."""
+        """Convert Japanese text to kana with pitch accent markers.
+        
+        For example, The text "こんにちは" would be converted as a list,
+        `['0', 'コ', '1', 'ン', '1', 'ニ', '1', 'チ', '1', 'ワ']`
+        """
         text = set_grapheme_case(text, case=self.ascii_letter_case)
         
         # njd (Nihongo Jisho Data): List of word dictionaries with linguistic features

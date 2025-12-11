@@ -25,7 +25,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import (
     VietnameseCharsTokenizer,
 )
 from nemo.collections.tts.g2p.models.i18n_ipa import IpaG2p
-from nemo.collections.tts.g2p.models.ja_jp_ipa import JapaneseG2p, JapaneseKanaAccent
+from nemo.collections.tts.g2p.models.ja_jp_ipa import JapaneseG2p, JapaneseKatakanaAccentG2p
 
 
 class TestTTSTokenizers:
@@ -286,7 +286,7 @@ class TestTTSTokenizers:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_japanese_katakana_g2p(self):
+    def test_japanese_katakana_accent_tokenizer(self):
         input_chopsticks = "箸"
         input_bridge = "橋"
         
