@@ -28,8 +28,6 @@ from nemo.collections.tts.g2p.utils import set_grapheme_case
 from nemo.utils import logging
 
 
-
-
 class JapaneseG2p(BaseG2p):
     def __init__(
         self,
