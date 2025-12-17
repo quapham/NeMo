@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import pathlib
-import pyopenjtalk
 import re
 import unicodedata
 from collections import defaultdict
 from typing import Dict, List, Optional, Union
+
+import pyopenjtalk
 
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import (
     GRAPHEME_CHARACTER_SETS,
