@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pathlib
+import pyopenjtalk
 import re
 import unicodedata
 from collections import defaultdict
