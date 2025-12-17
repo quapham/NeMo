@@ -27,10 +27,7 @@ from nemo.collections.tts.g2p.models.base import BaseG2p
 from nemo.collections.tts.g2p.utils import set_grapheme_case
 from nemo.utils import logging
 
-try:
-    import pyopenjtalk
-except ImportError:
-    pyopenjtalk = None
+
 
 
 class JapaneseG2p(BaseG2p):
