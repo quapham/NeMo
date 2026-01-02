@@ -28,14 +28,17 @@ from nemo.collections.common.tokenizers.text_to_speech.tokenizer_utils import (
 from nemo.collections.tts.g2p.models.base import BaseG2p
 from nemo.collections.tts.g2p.utils import GRAPHEME_CASE_MIXED, GRAPHEME_CASE_UPPER, set_grapheme_case
 from nemo.utils import logging
+from nemo.utils.decorators import experimental
 
 
+@experimental
 class IpaG2p(BaseG2p):
     # fmt: off
     STRESS_SYMBOLS = ["ˈ", "ˌ"]
     # Regex for roman characters, accented characters, and locale-agnostic numbers/digits
-    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}\d]")
-    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}\d]")
+    # Extended to support non-Latin scripts like Hindi
+    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}\u0900-\u097F\d]")
+    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}\u0900-\u097F\d]")
     # fmt: on
 
     def __init__(
@@ -190,6 +193,7 @@ class IpaG2p(BaseG2p):
                         or 'À' <= line[0] <= 'Ö'
                         or 'Ø' <= line[0] <= 'ö'
                         or 'ø' <= line[0] <= 'ÿ'
+                        or '\u0900' <= line[0] <= '\u097F'  # Devanagari (Hindi)
                         or line[0] == "'"
                     ):
                         parts = line.strip().split(maxsplit=1)
@@ -448,6 +452,12 @@ class IpaG2p(BaseG2p):
 
     def __call__(self, text: str) -> List[str]:
         text = normalize_unicode_text(text)
+
+        if self.heteronym_model is not None:
+            try:
+                text = self.heteronym_model.disambiguate(sentences=[text])[1][0]
+            except Exception as e:
+                logging.warning(f"Heteronym model failed {e}, skipping")
 
         words_list_of_tuple = self.word_tokenize_func(text)
 

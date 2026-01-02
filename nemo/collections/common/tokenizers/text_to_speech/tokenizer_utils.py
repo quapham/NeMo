@@ -52,11 +52,13 @@ SYNOGLYPH2ASCII = {g: asc for asc, glyphs in _synoglyphs.items() for g in glyphs
 LATIN_ALPHABET_BASIC = "A-Za-z"
 ACCENTED_CHARS = "À-ÖØ-öø-ÿ"
 LATIN_CHARS_ALL = f"{LATIN_ALPHABET_BASIC}{ACCENTED_CHARS}"
+# Hindi characters
+DEVANAGARI_CHARS = r'\u0900-\u097F'
 _WORDS_RE_EN = re.compile(
     fr"([{LATIN_ALPHABET_BASIC}]+(?:[{LATIN_ALPHABET_BASIC}\-']*[{LATIN_ALPHABET_BASIC}]+)*)|(\|[^|]*\|)|([^{LATIN_ALPHABET_BASIC}|]+)"
 )
 _WORDS_RE_ANY_LOCALE = re.compile(
-    fr"([{LATIN_CHARS_ALL}]+(?:[{LATIN_CHARS_ALL}\-']*[{LATIN_CHARS_ALL}]+)*)|(\|[^|]*\|)|([^{LATIN_CHARS_ALL}|]+)"
+    fr"([{LATIN_CHARS_ALL}{DEVANAGARI_CHARS}]+(?:[{LATIN_CHARS_ALL}{DEVANAGARI_CHARS}\-']*[{LATIN_CHARS_ALL}{DEVANAGARI_CHARS}]+)*)|(\|[^|]*\|)|([^{LATIN_CHARS_ALL}{DEVANAGARI_CHARS}|]+)"
 )
 
 
