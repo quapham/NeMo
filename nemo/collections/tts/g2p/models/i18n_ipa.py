@@ -36,8 +36,9 @@ class IpaG2p(BaseG2p):
     # fmt: off
     STRESS_SYMBOLS = ["ˈ", "ˌ"]
     # Regex for roman characters, accented characters, and locale-agnostic numbers/digits
-    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}\d]")
-    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}\d]")
+    # Extended to support non-Latin scripts like Hindi
+    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}\u0900-\u097F\d]")
+    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}\u0900-\u097F\d]")
     # fmt: on
 
     def __init__(
@@ -192,6 +193,7 @@ class IpaG2p(BaseG2p):
                         or 'À' <= line[0] <= 'Ö'
                         or 'Ø' <= line[0] <= 'ö'
                         or 'ø' <= line[0] <= 'ÿ'
+                        or '\u0900' <= line[0] <= '\u097F'  # Devanagari (Hindi)
                         or line[0] == "'"
                     ):
                         parts = line.strip().split(maxsplit=1)
