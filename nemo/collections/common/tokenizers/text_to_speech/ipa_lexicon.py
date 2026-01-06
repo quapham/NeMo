@@ -335,7 +335,7 @@ def get_ipa_punctuation_list(locale):
                 '〽',
                 '〓',
                 '〒',
-                '！', 
+                '！',
                 '？',
                 '・',
             ]
