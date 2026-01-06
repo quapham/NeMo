@@ -93,7 +93,7 @@ GRAPHEME_CHARACTER_SETS = {
     ),
     # ref: https://en.wikipedia.org/wiki/Devanagari
     "hi-IN": (
-        # Independent Vowels 
+        # Independent Vowels
         'अ', 'आ', 'इ', 'ई', 'उ', 'ऊ', 'ऋ', 'ॠ', 'ए', 'ऐ',
         'ओ', 'औ', 'ऍ', 'ऑ',
         # Consonants
