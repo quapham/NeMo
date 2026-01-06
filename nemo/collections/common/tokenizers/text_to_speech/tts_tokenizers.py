@@ -382,27 +382,28 @@ class ItalianCharsTokenizer(BaseCharsTokenizer):
 
 class HindiCharsTokenizer(BaseCharsTokenizer):
     """Hindi grapheme tokenizer (character-based, no phonemes).
-        Args:
-            punct: Whether to reserve grapheme for basic punctuation or not.
-            apostrophe: Whether to use apostrophe or not.
-            add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
-                if None then no blank in labels.
-            pad_with_space: Whether to pad text with spaces at the beginning and at the end or not.
-            non_default_punct_list: List of punctuation marks which will be used instead default.
-            text_preprocessing_func: Text preprocessing function. Keeps Devanagari unchanged.
-            
-            Each Unicode code point becomes 1 token (not visual grapheme clusters)
-            ड़ = ड (U+0921) + '़' nukta (U+093C)
-            
-            Input Text: अंगड़ाई
-            Chars: ['अ', 'ं', 'ग', 'ड', '़', 'ा', 'ई']
-            IDs:   [74, 138, 90, 100, 141, 124, 77]
+    Args:
+        punct: Whether to reserve grapheme for basic punctuation or not.
+        apostrophe: Whether to use apostrophe or not.
+        add_blank_at: Add blank to labels in the specified order ("last") or after tokens (any non None),
+            if None then no blank in labels.
+        pad_with_space: Whether to pad text with spaces at the beginning and at the end or not.
+        non_default_punct_list: List of punctuation marks which will be used instead default.
+        text_preprocessing_func: Text preprocessing function. Keeps Devanagari unchanged.
+
+        Each Unicode code point becomes 1 token (not visual grapheme clusters)
+        ड़ = ड (U+0921) + '़' nukta (U+093C)
+
+        Input Text: अंगड़ाई
+        Chars: ['अ', 'ं', 'ग', 'ड', '़', 'ा', 'ई']
+        IDs:   [74, 138, 90, 100, 141, 124, 77]
     """
 
     _LOCALE = "hi-IN"
     _PUNCT_LIST = get_ipa_punctuation_list(_LOCALE)
     _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="mixed")
     _CHARSET_STR += string.ascii_lowercase
+
     def __init__(
         self,
         chars=_CHARSET_STR,
@@ -422,6 +423,7 @@ class HindiCharsTokenizer(BaseCharsTokenizer):
             non_default_punct_list=non_default_punct_list,
             text_preprocessing_func=text_preprocessing_func,
         )
+
     def encode(self, text):
         """Encode Hindi text, handling Devanagari combining marks correctly."""
         cs, space, tokens = [], self.tokens[self.space], set(self.tokens)
@@ -438,7 +440,7 @@ class HindiCharsTokenizer(BaseCharsTokenizer):
             # Add a punctuation that has a single char.
             elif (c in self.PUNCT_LIST) and self.punct:
                 cs.append(c)
-            
+
             elif c != space:
                 logging.warning(f"Text: [{text}] contains unknown char: [{c}]. Symbol will be skipped.")
 
