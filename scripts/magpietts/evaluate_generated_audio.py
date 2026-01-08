@@ -90,8 +90,10 @@ def process_text(input_text):
 
     # Replace double spaces with single space
     single_space_text = " ".join(no_dash_text.split())
-
-    single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
+    
+    # Remove all punctuation (standard + Hindi + Japanese)
+    all_punctuation = string.punctuation + "।॥॰" + "。、「」『』・ー～（）【】〈〉《》〔〕"
+    single_space_text = single_space_text.translate(str.maketrans('', '', all_punctuation))
 
     return single_space_text
 
@@ -319,6 +321,10 @@ def evaluate(
 
         pred_context_ssim = 0.0
         gt_context_ssim = 0.0
+
+        pred_context_ssim_alternate = 0.0
+        gt_context_ssim_alternate = 0.0
+        
         with torch.inference_mode():
             extract_embedding_fn = partial(
                 extract_embedding,

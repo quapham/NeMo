@@ -117,6 +117,32 @@ model:
         tone_prefix: "#"
         ascii_letter_prefix: ""
         ascii_letter_case: "upper"
+    japanese_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.JapanesePhonemeTokenizer
+      punct: true               
+      apostrophe: false
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.ja_jp_ipa.JapaneseKatakanaAccentG2p
+        ascii_letter_prefix: ""
+        ascii_letter_case: "upper"
+    french_chartokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    hindi_chartokenizer:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.HindiCharsTokenizer
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+    italian_phoneme:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    vietnamese_phoneme:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    text_ce_tokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
 
   train_ds:
     dataset:

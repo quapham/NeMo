@@ -23,6 +23,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import (
     JapanesePhonemeTokenizer,
     SpanishCharsTokenizer,
     VietnameseCharsTokenizer,
+    HindiCharsTokenizer,
 )
 from nemo.collections.tts.g2p.models.i18n_ipa import IpaG2p
 from nemo.collections.tts.g2p.models.ja_jp_ipa import JapaneseG2p
@@ -280,6 +281,17 @@ class TestTTSTokenizers:
         g2p = JapaneseG2p(phoneme_dict=self.PHONEME_DICT_JA, word_segmenter="janome")
 
         tokenizer = JapanesePhonemeTokenizer(g2p=g2p)
+        chars, tokens = self._parse_text(tokenizer, input_text)
+
+        assert chars == expected_output
+
+    @pytest.mark.run_only_on('CPU')
+    @pytest.mark.unit
+    def test_hindi_chars_tokenizer(self):
+        input_text = "नमस्ते दुनिया!"
+        expected_output = "नमस्ते दुनिया!"
+
+        tokenizer = HindiCharsTokenizer()
         chars, tokens = self._parse_text(tokenizer, input_text)
 
         assert chars == expected_output

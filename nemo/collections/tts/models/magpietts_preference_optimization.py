@@ -1040,6 +1040,14 @@ def process_text_for_cer(input_text):
     single_space_text = " ".join(no_dash_text.split())
 
     single_space_text = single_space_text.translate(str.maketrans('', '', string.punctuation))
+    
+    # Remove Hindi punctuation (Devanagari)
+    hindi_punctuation = "।॥॰"
+    single_space_text = single_space_text.translate(str.maketrans('', '', hindi_punctuation))
+
+    # Remove Japanese punctuation
+    japanese_punctuation = "。、「」『』・ー～（）【】〈〉《》〔〕"
+    single_space_text = single_space_text.translate(str.maketrans('', '', japanese_punctuation))
 
     # @shehzeen: Added this to handle some common errors in ASR transcripts
     single_space_text.replace("h t t p", "http")
