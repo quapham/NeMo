@@ -173,6 +173,9 @@ IPA_CHARACTER_SETS = {
         'ɑ̃', 'ĩ', 'ũ', 'ẽ', 'õ', 'ɑ̃', 'ĩ', 'ũ', 'w̃',
         'ẽ', 'õ', 'hʲ', 'ɪ', 'ː', 'o̞', 'e̞',
     ),
+    # Note: '.' is intentionally included for Hindi IPA. It is used in the
+    # Hindi pronunciation lexicon/transcriptions (e.g., as a boundary or
+    # prosodic marker) and therefore must be part of the allowed phoneme set.
     "hi-IN": (
         '.', 'a', 'b', 'c', 'd', 'e', 'f', 'h', 'i', 'j',
         'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
