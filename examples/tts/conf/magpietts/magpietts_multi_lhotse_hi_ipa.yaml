@@ -118,8 +118,8 @@ model:
         phoneme_probability: 0.8
         use_chars: true
         use_stresses: false
-        grapheme_case: mixed
-        grapheme_prefix: ''
+        grapheme_case: upper
+        grapheme_prefix: '#'
     french_chartokenizer:
       _target_: AutoTokenizer
       pretrained_model: "google/byt5-small"

@@ -193,31 +193,7 @@ dataset_meta_info = {
         'feature_dir': '',
         'tokenizer_names': ['english_phoneme'],
         'whisper_language': 'en',
-    },
-    'hi_ai4bharat':{
-        'manifest_path': '/data/hindi_data/datasets/hi_val_manifest_17z.jsonl',
-        'audio_dir': '/data/hindi_data',
-        'feature_dir': None,
-        'tokenizer_names': ['hindi_phoneme'],
-        'whisper_language': 'hi',
-        'load_cached_codes_if_available': False
-    },
-    'hi_ai4bharat_char':{
-        'manifest_path': '/data/hindi_data/datasets/hi_val_manifest_17z.jsonl',
-        'audio_dir': '/data/hindi_data',
-        'feature_dir': None,
-        'tokenizer_names': ['hindi_chartokenizer'],
-        'whisper_language': 'hi',
-        'load_cached_codes_if_available': False
-    },'hi_ai4bharat_char_1':{
-        'manifest_path': '/output/hi_val_manifest.jsonl',
-        'audio_dir': '/',
-        'feature_dir': None,
-        'tokenizer_names': ['hindi_chartokenizer'],
-        'whisper_language': 'hi',
-        'load_cached_codes_if_available': False
-    },
-    'hi_ai4bharat_espeak':{
+    },'hi_ai4bharat_espeak':{
         'manifest_path': '/data/hindi_data/datasets/hi_val_manifest_17z_phonemizer.json',
         'audio_dir': '/data/hindi_data',
         'feature_dir': None,
@@ -225,22 +201,23 @@ dataset_meta_info = {
         'whisper_language': 'hi',
         'load_cached_codes_if_available': False
     },
-    'vi_multi_unseen':{
-        'manifest_path': '/output/unseen_multispeaker_vi.json',
-        'audio_dir': '/',
+    'hi_ai4bharat':{
+        'manifest_path': '/output/hi_val_manifest.jsonl',
+        'audio_dir': '/data/hindi_data',
         'feature_dir': None,
-        'tokenizer_names': ['vietnamese_phoneme'],
-        'whisper_language': 'vi',
-        'load_cached_codes_if_available': False
-    },'vi_multi_unseen_5s':{
-        'manifest_path': '/output/vivos_dur5s_manifest.jsonl',
-        'audio_dir': '/',
-        'feature_dir': None,
-        'tokenizer_names': ['vietnamese_phoneme'],
-        'whisper_language': 'vi',
+        'tokenizer_names': ['hindi_phoneme'],
+        'whisper_language': 'hi',
         'load_cached_codes_if_available': False
     },
-    'vi_multi_unseen_5s_norm':{
+    'hi_ai4bharat_char':{
+        'manifest_path': '/output/hi_val_manifest.jsonl',
+        'audio_dir': '/data/hindi_data',
+        'feature_dir': None,
+        'tokenizer_names': ['hindi_chartokenizer'],
+        'whisper_language': 'hi',
+        'load_cached_codes_if_available': False
+    },
+    'vi_multi_unseen':{
         'manifest_path': '/output/vivos_dur5s_manifest_norm.jsonl',
         'audio_dir': '/',
         'feature_dir': None,
