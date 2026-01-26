@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import validate_locale
 from nemo.collections.common.tokenizers.text_to_speech.tokenizer_utils import (
     LATIN_CHARS_ALL,
+    INDIC_CHARS_ALL,
     any_locale_word_tokenize,
     english_word_tokenize,
     normalize_unicode_text,
@@ -37,8 +38,8 @@ class IpaG2p(BaseG2p):
     STRESS_SYMBOLS = ["ˈ", "ˌ"]
     # Regex for roman characters, accented characters, and locale-agnostic numbers/digits
     # Extended to support non-Latin scripts like Hindi
-    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}\u0900-\u097F\d]")
-    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}\u0900-\u097F\d]")
+    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}\d]")
+    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}\d]")
     # fmt: on
 
     def __init__(
