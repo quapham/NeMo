@@ -31,6 +31,9 @@ from nemo.collections.tts.g2p.utils import GRAPHEME_CASE_MIXED, GRAPHEME_CASE_UP
 from nemo.utils import logging
 
 
+# Compiled regex pattern for Indic scripts (used in dictionary parsing)
+_INDIC_PATTERN = re.compile(f'^[{INDIC_CHARS_ALL}]')
+
 class IpaG2p(BaseG2p):
     # fmt: off
     STRESS_SYMBOLS = ["ˈ", "ˌ"]
@@ -191,7 +194,7 @@ class IpaG2p(BaseG2p):
                         or 'À' <= line[0] <= 'Ö'
                         or 'Ø' <= line[0] <= 'ö'
                         or 'ø' <= line[0] <= 'ÿ'
-                        or '\u0900' <= line[0] <= '\u097F'  # Devanagari (Hindi)
+                        or _INDIC_PATTERN.match(line[0]) 
                         or line[0] == "'"
                     ):
                         parts = line.strip().split(maxsplit=1)
