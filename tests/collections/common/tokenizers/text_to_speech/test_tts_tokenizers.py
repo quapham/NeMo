@@ -287,7 +287,6 @@ class TestTTSTokenizers:
         chars, tokens = self._parse_text(tokenizer, input_text)
         assert chars == expected_output
 
-        
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
     def test_japanese_phoneme_tokenizer(self):

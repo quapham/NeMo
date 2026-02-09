@@ -55,12 +55,14 @@ ACCENTED_CHARS = "À-ÖØ-öø-ÿ"
 LATIN_CHARS_ALL = f"{LATIN_ALPHABET_BASIC}{ACCENTED_CHARS}"
 
 # Indic characters based on https://www.unicode.org/charts/
-DEVANAGARI_CHARS = r'\u0900-\u097F'  # Hindi, Marathi, Nepali, Sanskrit https://en.wikipedia.org/wiki/Devanagari_(Unicode_block)
-BENGALI_CHARS = r'\u0980-\u09FF'     # Bengali, Assamese
-TAMIL_CHARS = r'\u0B80-\u0BFF'       # Tamil
-TELUGU_CHARS = r'\u0C00-\u0C7F'      # Telugu
-KANNADA_CHARS = r'\u0C80-\u0CFF'     # Kannada
-GUJARATI_CHARS = r'\u0A80-\u0AFF'    # Gujarati
+DEVANAGARI_CHARS = (
+    r'\u0900-\u097F'  # Hindi, Marathi, Nepali, Sanskrit https://en.wikipedia.org/wiki/Devanagari_(Unicode_block)
+)
+BENGALI_CHARS = r'\u0980-\u09FF'  # Bengali, Assamese
+TAMIL_CHARS = r'\u0B80-\u0BFF'  # Tamil
+TELUGU_CHARS = r'\u0C00-\u0C7F'  # Telugu
+KANNADA_CHARS = r'\u0C80-\u0CFF'  # Kannada
+GUJARATI_CHARS = r'\u0A80-\u0AFF'  # Gujarati
 INDIC_CHARS_ALL = f"{DEVANAGARI_CHARS}{BENGALI_CHARS}{TAMIL_CHARS}{TELUGU_CHARS}{KANNADA_CHARS}{GUJARATI_CHARS}"
 
 _WORDS_RE_EN = re.compile(
