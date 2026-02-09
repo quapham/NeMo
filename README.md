@@ -19,13 +19,12 @@
 
 <details open>
   <summary><b>⚠️ Pivot notice: This repo will pivot to focus on speech models collections only. Please refer to <a href=https://github.com/NVIDIA-NeMo>NeMo Framework Github Org</a> for the complete list of repos under NeMo Framework</b></summary>
-      NeMo 2.0, with its support for LLMs and VLMs will be deprecated by 25.11, and replaced by <a href=https://github.com/NVIDIA-NeMo/Megatron-Bridge>NeMo Megatron-Bridge</a> and <a href=https://github.com/NVIDIA-NeMo/AutoModel>NeMo AutoModel</a>. More details can be found in the <a href=https://github.com/NVIDIA-NeMo>NeMo Framework GitHub org readme</a>. (2025-10-10)
-
-      Following collections are deprecated and will be removed in a later release, please use previous versions if you are using them:
-      - nlp
-      - llm
-      - vlm
-      - vision
+  <blockquote>
+    NeMo 2.0, with its support for LLMs and VLMs will be deprecated by 25.11, and replaced by <a href=https://github.com/NVIDIA-NeMo/Megatron-Bridge>NeMo Megatron-Bridge</a> and <a href=https://github.com/NVIDIA-NeMo/AutoModel>NeMo AutoModel</a>. More details can be found in the <a href=https://github.com/NVIDIA-NeMo>NeMo Framework GitHub org readme</a>. (2025-10-10)
+    <br><br>
+    <b>Deprecated collections</b> (will be removed in a later release):<br>
+    <code>avlm</code> · <code>diffusion</code> · <code>llm</code> · <code>multimodal</code> · <code>multimodal-autoregressive</code> · <code>nlp</code> · <code>speechlm</code> · <code>vision</code> · <code>vlm</code>
+  </blockquote>
 </details>
 
 <details closed>
@@ -286,9 +285,11 @@ multi-GPU/multi-node training.
 
 ## Requirements
 
-- Python 3.10 or above
+- Python 3.12 or above
 - Pytorch 2.6 or above
 - NVIDIA GPU (if you intend to do model training)
+
+As of [Pytorch 2.6](https://docs.pytorch.org/docs/stable/notes/serialization.html#torch-load-with-weights-only-true), `torch.load` defaults to using `weights_only=True`. Some model checkpoints may require using `weights_only=False`. In this case, you can set the env var `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` before running code that uses `torch.load`. However, this should only be done with trusted files. Loading files from untrusted sources with more than weights only can have the risk of arbitrary code execution.
 
 ## Developer Documentation
 
