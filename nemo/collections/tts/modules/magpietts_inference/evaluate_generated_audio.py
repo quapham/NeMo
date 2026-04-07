@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import pprint
+import re
 import string
 import tempfile
 import time
@@ -126,6 +127,17 @@ def read_manifest(manifest_path):
 
 
 def process_text(input_text):
+    # Remove Arabic tashkeel (diacritics/harakat)
+    input_text = re.sub(r'[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]', '', input_text)
+    # Remove Arabic punctuation
+    input_text = re.sub(r'[،؟؛«»٪٫٬]', '', input_text)
+    # Remove Hindi-specific punctuation (danda, double danda)
+    input_text = re.sub(r'[।॥॰]', '', input_text)
+    # Remove Mandarin-specific punctuation
+    input_text = re.sub(r'[，。！？；：""''（）【】《》〈〉「」『』、…·～—–\u3000]', '', input_text)
+    # Remove Japanese-specific punctuation
+    input_text = re.sub(r'[。、！？「」『』（）【】〔〕・…‥〜ー\u3000\u30FB]', '', input_text)
+
     # Convert text to lowercase
     lower_case_text = input_text.lower()
 
@@ -143,21 +155,28 @@ def process_text(input_text):
     return single_space_text
 
 
-def transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=8, label=""):
+def transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=8, label="", lang=None):
     """Transcribe multiple audio files with a NeMo ASR model in batches. Returns list of transcriptions (one per path)."""
     all_transcriptions = []
     for start in range(0, len(audio_paths), batch_size):
         batch_paths = audio_paths[start : start + batch_size]
         try:
             with torch.inference_mode():
-                batch_results = asr_model.transcribe(batch_paths, batch_size=len(batch_paths), use_lhotse=False)
+                if lang:
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                        for p in batch_paths:
+                            f.write(json.dumps({"audio_filepath": p, "duration": 100000, "text": "", "lang": lang}) + '\n')
+                        mpath = f.name
+                    batch_results = asr_model.transcribe(audio=[mpath])
+                    os.unlink(mpath)
+                else:
+                    batch_results = asr_model.transcribe(batch_paths, batch_size=len(batch_paths), use_lhotse=False)
             for r in batch_results:
-                all_transcriptions.append(process_text(r.text))
+                all_transcriptions.append(process_text(r.text))   # append not extend
         except Exception as e:
             logging.info("Error during batched ASR ({} audio): {}".format(label, e))
             all_transcriptions.extend([""] * len(batch_paths))
     return all_transcriptions
-
 
 def transcribe_with_whisper_batched(
     whisper_model, whisper_processor, audio_paths, language, device, batch_size=8, label=""
@@ -249,12 +268,12 @@ def transcribed_batched(
     """Transcribe a list of audio files using NeMo ASR (English) or Whisper (other languages)."""
     if language == "en":
         texts = transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=asr_batch_size, label=label)
+    elif asr_model is not None:
+        # Multilingual NeMo model (.nemo) - inject lang into manifest for Lhotse
+        texts = transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=asr_batch_size, label=label, lang=language)
     else:
-        texts = transcribe_with_whisper_batched(
-            whisper_model, whisper_processor, audio_paths, language, device, batch_size=asr_batch_size, label=label
-        )
+        texts = transcribe_with_whisper_batched(whisper_model, whisper_processor, audio_paths, language, device, batch_size=asr_batch_size, label=label)
     return texts
-
 
 def load_evaluation_models(
     language="en", sv_model_type="titanet", asr_model_name="stt_en_conformer_transducer_large", device="cuda"
@@ -278,10 +297,13 @@ def load_evaluation_models(
         'feature_extractor': None,
     }
 
-    if language == "en":
-        if os.path.isfile(asr_model_name) and asr_model_name.endswith('.nemo'):
+    if asr_model_name.endswith(".nemo"):
+        if os.path.isfile(asr_model_name):
             models['asr_model'] = nemo_asr.models.ASRModel.restore_from(restore_path=asr_model_name).to(device).eval()
-        elif asr_model_name.startswith("nvidia/") or asr_model_name in ["stt_en_conformer_transducer_large"]:
+        else:
+            raise ValueError(f"ASR model file not found: {asr_model_name}")
+    elif language == "en":
+        if asr_model_name.startswith("nvidia/") or asr_model_name in ["stt_en_conformer_transducer_large"]:
             models['asr_model'] = nemo_asr.models.ASRModel.from_pretrained(model_name=asr_model_name).to(device).eval()
         else:
             raise ValueError(f"ASR model {asr_model_name} not supported")
