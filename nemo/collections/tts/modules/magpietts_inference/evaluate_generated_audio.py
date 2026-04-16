@@ -34,6 +34,19 @@ from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, WhisperForCo
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
+
+try:
+    from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
+        EncDecHybridRNNTCTCBPEModelWithPrompt,
+        HybridRNNTCTCPromptTranscribeConfig,
+    )
+
+    _PARAKEET_PROMPT_ASR_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    EncDecHybridRNNTCTCBPEModelWithPrompt = None  # type: ignore
+    HybridRNNTCTCPromptTranscribeConfig = None  # type: ignore
+    _PARAKEET_PROMPT_ASR_AVAILABLE = False
+
 from nemo.collections.tts.metrics.eou_classifier import EoUClassification, EoUClassifier, EoUType
 from nemo.collections.tts.metrics.frechet_codec_distance import FrechetCodecDistance
 from nemo.utils import logging
@@ -57,6 +70,7 @@ FILEWISE_METRICS_TO_SAVE = [
     'wer',
     'pred_context_ssim',
     'pred_text',
+    'gt_audio_text',
     'gt_text',
     'gt_audio_filepath',
     'pred_audio_filepath',
@@ -155,24 +169,60 @@ def process_text(input_text):
     return single_space_text
 
 
-def transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=8, label="", lang=None):
-    """Transcribe multiple audio files with a NeMo ASR model in batches. Returns list of transcriptions (one per path)."""
+def eval_language_to_parakeet_target_lang(lang: str) -> str:
+    """Map evalset ``whisper_language`` (or HF-style codes) to Parakeet prompt ``target_lang`` IDs."""
+    if not lang:
+        return "en-US"
+    lang = lang.strip()
+    # BCP-47 style already (e.g. pt-BR, zh-CN, en-US)
+    if "-" in lang and len(lang) >= 4:
+        return lang
+    return {
+        "en": "en-US",
+        "ar": "ar",
+        "ko": "ko-KR",
+        "hi": "hi-IN",
+        "zh": "zh-CN",
+        "it": "it-IT",
+        "es": "es-ES",
+        "de": "de-DE",
+        "fr": "fr-FR",
+        "ja": "ja-JP",
+    }.get(lang, lang)
+
+
+def transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=8, label="", eval_language="en"):
+    """Transcribe with a NeMo ASR model.
+
+    Parakeet multilingual **prompt** checkpoints (``EncDecHybridRNNTCTCBPEModelWithPrompt``) require
+    ``HybridRNNTCTCPromptTranscribeConfig`` with a valid ``target_lang``; plain ``transcribe()`` is not enough.
+    """
+    use_prompt = (
+        _PARAKEET_PROMPT_ASR_AVAILABLE
+        and EncDecHybridRNNTCTCBPEModelWithPrompt is not None
+        and isinstance(asr_model, EncDecHybridRNNTCTCBPEModelWithPrompt)
+    )
+    target_lang = eval_language_to_parakeet_target_lang(eval_language)
+
     all_transcriptions = []
     for start in range(0, len(audio_paths), batch_size):
         batch_paths = audio_paths[start : start + batch_size]
         try:
             with torch.inference_mode():
-                if lang:
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                        for p in batch_paths:
-                            f.write(json.dumps({"audio_filepath": p, "duration": 100000, "text": "", "lang": lang}) + '\n')
-                        mpath = f.name
-                    batch_results = asr_model.transcribe(audio=[mpath])
-                    os.unlink(mpath)
+                if use_prompt and HybridRNNTCTCPromptTranscribeConfig is not None:
+                    cfg = HybridRNNTCTCPromptTranscribeConfig(
+                        batch_size=len(batch_paths),
+                        use_lhotse=False,
+                        target_lang=target_lang,
+                    )
+                    batch_results = asr_model.transcribe(batch_paths, override_config=cfg)
                 else:
-                    batch_results = asr_model.transcribe(batch_paths, batch_size=len(batch_paths), use_lhotse=False)
+                    batch_results = asr_model.transcribe(batch_paths, batch_size=len(batch_paths))
             for r in batch_results:
-                all_transcriptions.append(process_text(r.text))   # append not extend
+                hyp_text = getattr(r, "text", None)
+                if hyp_text is None:
+                    hyp_text = str(r)
+                all_transcriptions.append(process_text(hyp_text))
         except Exception as e:
             logging.info("Error during batched ASR ({} audio): {}".format(label, e))
             all_transcriptions.extend([""] * len(batch_paths))
@@ -265,14 +315,27 @@ def transcribed_batched(
     asr_batch_size,
     label="",
 ):
-    """Transcribe a list of audio files using NeMo ASR (English) or Whisper (other languages)."""
-    if language == "en":
-        texts = transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=asr_batch_size, label=label)
-    elif asr_model is not None:
-        # Multilingual NeMo model (.nemo) - inject lang into manifest for Lhotse
-        texts = transcribe_with_nemo_asr_batched(asr_model, audio_paths, batch_size=asr_batch_size, label=label, lang=language)
+    """Transcribe a list of audio files using NeMo ASR (incl. Parakeet prompt) or Whisper."""
+    if asr_model is not None:
+        texts = transcribe_with_nemo_asr_batched(
+            asr_model,
+            audio_paths,
+            batch_size=asr_batch_size,
+            label=label,
+            eval_language=language,
+        )
+    elif whisper_model is not None:
+        texts = transcribe_with_whisper_batched(
+            whisper_model,
+            whisper_processor,
+            audio_paths,
+            language,
+            device,
+            batch_size=asr_batch_size,
+            label=label,
+        )
     else:
-        texts = transcribe_with_whisper_batched(whisper_model, whisper_processor, audio_paths, language, device, batch_size=asr_batch_size, label=label)
+        raise ValueError("No ASR model loaded for evaluation (asr_model and whisper_model are both None)")
     return texts
 
 def load_evaluation_models(
@@ -281,9 +344,10 @@ def load_evaluation_models(
     """Load ASR and speaker verification models used for evaluation.
 
     Args:
-        language: Language code. "en" uses a NeMo ASR model; other languages use Whisper.
+        language: Language / whisper hint for transcription (Parakeet prompt ``target_lang`` mapping, Whisper prompts).
         sv_model_type: Speaker verification model type ("wavlm" or "titanet").
-        asr_model_name: Name of the NeMo ASR model (used only when language is "en").
+        asr_model_name: NeMo ASR: local ``.nemo`` path (any language), or Hub id when ``language=="en"``;
+            otherwise Whisper is used unless a ``.nemo`` path is given.
         device: Device to place models on.
 
     Returns:
@@ -298,10 +362,9 @@ def load_evaluation_models(
     }
 
     if asr_model_name.endswith(".nemo"):
-        if os.path.isfile(asr_model_name):
-            models['asr_model'] = nemo_asr.models.ASRModel.restore_from(restore_path=asr_model_name).to(device).eval()
-        else:
-            raise ValueError(f"ASR model file not found: {asr_model_name}")
+        models['asr_model'] = nemo_asr.models.ASRModel.restore_from(
+            restore_path=asr_model_name,
+        ).to(device).eval()
     elif language == "en":
         if asr_model_name.startswith("nvidia/") or asr_model_name in ["stt_en_conformer_transducer_large"]:
             models['asr_model'] = nemo_asr.models.ASRModel.from_pretrained(model_name=asr_model_name).to(device).eval()
@@ -480,6 +543,15 @@ def evaluate_dir(
             utmosv2_score = float('nan')
 
         gt_text = gt_texts_processed[ridx]
+
+        if language in ("zh", "zh-CN", "zh-TW"):
+            pred_text = pred_text.replace(" ", "")
+            gt_text = gt_text.replace(" ", "")
+            if gt_audio_text is not None:
+                gt_audio_text = gt_audio_text.replace(" ", "")
+        else:
+            pred_text = pred_text
+            gt_text = gt_text
 
         detailed_cer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=True)
         detailed_wer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=False)
@@ -787,12 +859,26 @@ def main():
     parser.add_argument('--audio_dir', type=str, default=None)
     parser.add_argument('--generated_audio_dir', type=str, default=None)
     parser.add_argument('--whisper_language', type=str, default="en")
-    parser.add_argument('--evalset', type=str, default=None)
+    parser.add_argument(
+        '--datasets_json_path',
+        type=str,
+        default=None,
+        help='Path to evalset JSON (use with --evalset <key> to fill manifest_path and audio_dir)',
+    )
+    parser.add_argument(
+        '--evalset',
+        type=str,
+        default=None,
+        help='Dataset key inside --datasets_json_path',
+    )
     args = parser.parse_args()
 
     if args.evalset is not None:
-        dataset_meta_info = load_evalset_config()
-        assert args.evalset in dataset_meta_info, f"Dataset '{args.evalset}' not found in evalset_config.json"
+        if not args.datasets_json_path:
+            parser.error("--datasets_json_path is required when using --evalset")
+        dataset_meta_info = load_evalset_config(args.datasets_json_path)
+        if args.evalset not in dataset_meta_info:
+            parser.error(f"Dataset '{args.evalset}' not found in {args.datasets_json_path}")
         args.manifest_path = dataset_meta_info[args.evalset]['manifest_path']
         args.audio_dir = dataset_meta_info[args.evalset]['audio_dir']
 

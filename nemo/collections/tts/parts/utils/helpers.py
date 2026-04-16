@@ -42,7 +42,9 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import re
 import string
+import unicodedata
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -807,15 +809,32 @@ def g2p_backward_compatible_support(g2p_target: str) -> str:
     return g2p_target_new
 
 
+_ARABIC_DIACRITICS_RE = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]")
+
+
+def _strip_unicode_punctuation(text: str) -> str:
+    normalized_chars = []
+    for char in text:
+        category = unicodedata.category(char)
+        if category == "Pd":
+            normalized_chars.append(" ")
+        elif category.startswith("P"):
+            continue
+        else:
+            normalized_chars.append(char)
+    return "".join(normalized_chars)
+
+
 def process_text_for_cer(input_text):
     """Normalizes text for CER/WER calculation."""
-    text = input_text.lower()
+    text = unicodedata.normalize("NFC", input_text).casefold()
+    text = _ARABIC_DIACRITICS_RE.sub("", text)
     for char in [",", "'", ";", "."]:
         text = text.replace(char, "")
     text = text.replace("-", " ")
-    text = " ".join(text.split())
-    # Strip any remaining punctuation characters
     text = text.translate(str.maketrans('', '', string.punctuation))
+    text = _strip_unicode_punctuation(text)
+    text = " ".join(text.split())
     # Fix common ASR transcript artifacts
     text = text.replace("h t t p", "http")
     text = text.replace("w w w", "www")

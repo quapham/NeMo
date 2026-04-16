@@ -22,6 +22,7 @@ from nemo.collections.common.tokenizers.text_to_speech.ipa_lexicon import valida
 from nemo.collections.common.tokenizers.text_to_speech.tokenizer_utils import (
     LATIN_CHARS_ALL,
     INDIC_CHARS_ALL,
+    KOREAN_CHARS,
     any_locale_word_tokenize,
     english_word_tokenize,
     normalize_unicode_text,
@@ -32,13 +33,13 @@ from nemo.utils import logging
 
 # Compiled regex pattern for Indic scripts (used in dictionary parsing)
 _INDIC_PATTERN = re.compile(f'^[{INDIC_CHARS_ALL}]')
-
+_KOREAN_PATTERN = re.compile(f'^[{KOREAN_CHARS}]')
 class IpaG2p(BaseG2p):
     # fmt: off
     STRESS_SYMBOLS = ["ˈ", "ˌ"]
     # Regex for roman characters, accented characters, and locale-agnostic numbers/digits
-    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}\d]")
-    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}\d]")
+    CHAR_REGEX = re.compile(fr"[{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}{KOREAN_CHARS}\d]")
+    PUNCT_REGEX = re.compile(fr"[^{LATIN_CHARS_ALL}{INDIC_CHARS_ALL}{KOREAN_CHARS}\d]")
     # fmt: on
 
     def __init__(
@@ -203,6 +204,7 @@ class IpaG2p(BaseG2p):
                         or 'Ø' <= line[0] <= 'ö'
                         or 'ø' <= line[0] <= 'ÿ'
                         or _INDIC_PATTERN.match(line[0])
+                        or _KOREAN_PATTERN.match(line[0])
                         or line[0] == "'"
                     ):
                         parts = line.strip().split(maxsplit=1)

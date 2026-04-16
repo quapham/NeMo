@@ -15,7 +15,7 @@
 
 # fmt: off
 
-SUPPORTED_LOCALES = ["en-US", "de-DE", "es-ES", "it-IT", "fr-FR", "vi-VN", "ja-JP", "hi-IN", "ar-MSA","pt-BR"]
+SUPPORTED_LOCALES = ["en-US", "de-DE", "es-ES", "it-IT", "fr-FR", "vi-VN", "ja-JP", "hi-IN", "ar-MSA","pt-BR","ko-KR"]
 
 DEFAULT_PUNCTUATION = (
     ',', '.', '!', '?', '-',
@@ -369,6 +369,22 @@ def get_ipa_punctuation_list(locale):
                 '،',
                 '؛',
                 '؟',
+            ]
+        )
+    elif locale == "ko-KR":
+        punct_set.update(
+            [
+                '『',
+                '』',
+                '「',
+                '」',
+                '《',
+                '》',
+                '…',
+                '·',
+                '—',
+                '–',
+                '〜',
             ]
         )
     punct_list = sorted(list(punct_set))
