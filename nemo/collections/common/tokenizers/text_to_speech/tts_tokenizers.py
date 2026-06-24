@@ -403,8 +403,8 @@ class HindiCharsTokenizer(BaseCharsTokenizer):
     """
 
     _LOCALE = "hi-IN"
-    _PUNCT_LIST = get_ipa_punctuation_list(_LOCALE)
-    _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="lower")
+    _PUNCT_LIST = get_ipa_punctuation_list(None)
+    _CHARSET_STR = get_grapheme_character_set(locale=_LOCALE, case="mixed")
     _CHARSET_STR += string.ascii_lowercase
 
     def __init__(
