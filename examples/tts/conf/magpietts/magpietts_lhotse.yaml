@@ -63,10 +63,141 @@ model:
     text_ce_tokenizer:  # Used for text context
       _target_: AutoTokenizer
       pretrained_model: "google/byt5-small"
-    ### For additional languages, consider adding a generic byt5 tokenizer like the one below
-    # french_chartokenizer:  # Used for text context
-    #     _target_: AutoTokenizer
-    #     pretrained_model: "google/byt5-small"
+    spanish_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+      locale: es-ES
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+        locale: es-ES
+        phoneme_dict: "scripts/tts_dataset_files/es_ES/es_ES_nv230301.dict"
+        phoneme_probability: 0.8
+        ignore_ambiguous_words: false
+        use_chars: true
+        use_stresses: true
+    german_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+      locale: de-DE
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+        locale: 'de-DE'
+        phoneme_dict: "scripts/tts_dataset_files/de/de_nv230119.dict"
+        heteronyms: "scripts/tts_dataset_files/de/de_nv230119.heteronym"
+        phoneme_probability: 0.8
+        ignore_ambiguous_words: false
+        use_chars: true
+        use_stresses: true
+        grapheme_case: mixed
+        grapheme_prefix: '#'
+    mandarin_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.ChinesePhonemesTokenizer
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.zh_cn_pinyin.ChineseG2p
+        phoneme_dict: "scripts/tts_dataset_files/zh/36finals/ipa_dict_nv23.05.txt"
+        word_segmenter: "jieba"
+        phoneme_prefix: ""
+        phoneme_case: "lower"
+        tone_prefix: "#"
+        ascii_letter_prefix: ""
+        ascii_letter_case: "upper"
+    japanese_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.JapanesePhonemeTokenizer
+      punct: true
+      apostrophe: false
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.ja_jp_ipa.JapaneseKatakanaAccentG2p
+        ascii_letter_prefix: ""
+        ascii_letter_case: "lower"
+    hindi_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+      locale: hi-IN
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+        _convert_: all
+        locale: hi-IN
+        phoneme_dict:
+          - "scripts/tts_dataset_files/hi_IN/hi_prondict-v0.3_nostress_fixed.dict"
+          - "scripts/tts_dataset_files/ipa_cmudict-0.7b_nv26.07.txt"
+        phoneme_probability: 0.8
+        ignore_ambiguous_words: false
+        use_chars: true
+        use_stresses: true
+        grapheme_case: 'upper'
+        grapheme_prefix: ''
+    portuguese_Brazilian_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+      locale: pt-BR
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+        locale: pt-BR
+        phoneme_dict: "scripts/tts_dataset_files/pt_BR/pt_br_prondict-v1.0.dict"
+        phoneme_probability: 0.8
+        ignore_ambiguous_words: false
+        use_chars: true
+        use_stresses: true
+        grapheme_case: 'upper'
+        grapheme_prefix: '#'
+    korean_phoneme:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.IPATokenizer
+      locale: ko-KR
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+      g2p:
+        _target_: nemo.collections.tts.g2p.models.i18n_ipa.IpaG2p
+        _convert_: all
+        locale: ko-KR
+        phoneme_dict:
+          - "scripts/tts_dataset_files/ko_KR/ko_prondict-v1.0.dict"
+          - "scripts/tts_dataset_files/ipa_cmudict-0.7b_nv26.07.txt"
+        phoneme_probability: 0.8
+        ignore_ambiguous_words: false
+        use_chars: true
+        use_stresses: true
+        grapheme_case: 'upper'
+        grapheme_prefix: ''
+    arabic_MSA_chartokenizer:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.ArabicCharsTokenizer
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+    arabic_SA_chartokenizer:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.ArabicCharsTokenizer
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+    arabic_AE_chartokenizer:
+      _target_: nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers.ArabicCharsTokenizer
+      punct: true
+      apostrophe: true
+      pad_with_space: true
+    french_chartokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    italian_chartokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    vietnamese_chartokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
+    korean_chartokenizer:
+      _target_: AutoTokenizer
+      pretrained_model: "google/byt5-small"
 
   train_ds:
     use_lhotse: ${model.use_lhotse}
@@ -195,6 +326,7 @@ trainer:
   enable_checkpointing: false  # Provided by exp_manager
   logger: false  # Provided by exp_manager
   log_every_n_steps: 100
+  check_val_every_n_epoch: 1
   limit_train_batches: 1_000
   val_check_interval: 1_000
   num_sanity_val_steps: 0
