@@ -53,6 +53,9 @@ class EOSDetectionMethod(PrettyStrEnum):
     ARGMAX_OR_MULTINOMIAL_ALL = "argmax_or_multinomial_all"
     ARGMAX_ZERO_CB = "argmax_zero_cb"
     ARGMAX_OR_MULTINOMIAL_ZERO_CB = "argmax_or_multinomial_zero_cb"
+    # EOS only from the *sampled* code of codebook 0. With the EasyMagpie local transformer the rest of the stacked
+    # frame follows it: EOS is forced in every later codebook when index 0 sampled EOS, and masked otherwise.
+    MULTINOMIAL_ZERO_CB = "multinomial_zero_cb"
 
     @staticmethod
     def detection_type(detection_method: EOSDetectionMethod):
@@ -60,7 +63,11 @@ class EOSDetectionMethod(PrettyStrEnum):
             return "any"
         elif detection_method in [EOSDetectionMethod.ARGMAX_ALL, EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ALL]:
             return "all"
-        elif detection_method in [EOSDetectionMethod.ARGMAX_ZERO_CB, EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ZERO_CB]:
+        elif detection_method in [
+            EOSDetectionMethod.ARGMAX_ZERO_CB,
+            EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ZERO_CB,
+            EOSDetectionMethod.MULTINOMIAL_ZERO_CB,
+        ]:
             return "zero_cb"
         else:
             raise ValueError(f"Invalid EOS detection method: {detection_method}")
@@ -79,6 +86,8 @@ class EOSDetectionMethod(PrettyStrEnum):
             EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ZERO_CB,
         ]:
             return "argmax_or_multinomial"
+        elif detection_method == EOSDetectionMethod.MULTINOMIAL_ZERO_CB:
+            return "multinomial"
         else:
             raise ValueError(f"Invalid EOS detection method: {detection_method}")
 
@@ -557,6 +566,7 @@ class LocalTransformerHelper:
         use_kv_cache: bool = True,
         forbid_audio_eos: bool = False,
         sanitize_logits: bool = False,
+        zero_cb_eos: bool = False,
     ) -> torch.Tensor:
         """Sample audio codes autoregressively across codebooks using the local transformer.
 
@@ -571,6 +581,10 @@ class LocalTransformerHelper:
             use_kv_cache: Whether to use key-value caching in the local transformer.
             forbid_audio_eos: Whether to globally forbid audio EOS.
             sanitize_logits: Whether to clamp/clean logits before sampling.
+            zero_cb_eos: EOS rule ``multinomial_zero_cb``. Local-transformer index 0 is sampled as usual (it may
+                sample EOS); if it sampled EOS, every later index of the frame is forced to EOS, otherwise EOS is
+                masked at every later index. A frame is then either all EOS or EOS-free, so stopping on EOS in any
+                codebook is the same as stopping on the sampled codebook-0 code.
 
         Returns:
             Sampled audio codes (B, num_codebooks, frame_stacking_factor).
@@ -579,6 +593,7 @@ class LocalTransformerHelper:
         dec_output = dec_output.unsqueeze(1)  # (B, 1, E)
         local_transformer_input = self.local_transformer_in_projection(dec_output)
         all_preds = []
+        frame_is_eos = None  # zero_cb_eos: (B,) or (2B,) with CFG, decided by the code sampled at index 0
         for codebook_num in range(self.num_audio_codebooks * self.frame_stacking_factor):
             _mask = torch.ones(
                 local_transformer_input.size(0), local_transformer_input.size(1), device=local_transformer_input.device
@@ -609,6 +624,11 @@ class LocalTransformerHelper:
                 codebook_logits.unsqueeze(1), self.codebook_size, forbid_audio_eos=forbid_audio_eos
             ).squeeze(1)
 
+            if frame_is_eos is not None:
+                codebook_logits[frame_is_eos] = float('-inf')
+                codebook_logits[frame_is_eos, self.audio_eos_id] = 0.0
+                codebook_logits[~frame_is_eos, self.audio_eos_id] = float('-inf')
+
             codebook_logits_topk = torch.topk(codebook_logits, topk, dim=-1)[0]
             indices_to_remove = codebook_logits < codebook_logits_topk[:, -1].unsqueeze(-1)
             codebook_logits_rescored = codebook_logits.clone()
@@ -622,6 +642,8 @@ class LocalTransformerHelper:
 
             if use_cfg:
                 codebook_preds[actual_batch_size:] = codebook_preds[:actual_batch_size]
+            if zero_cb_eos and codebook_num == 0:
+                frame_is_eos = codebook_preds[:, 0] == self.audio_eos_id
             all_preds.append(codebook_preds)
 
             next_local_transformer_input = self.audio_embeddings[codebook_num](codebook_preds.squeeze(-1)).unsqueeze(1)

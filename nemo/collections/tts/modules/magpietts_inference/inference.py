@@ -30,7 +30,9 @@ import abc
 import glob
 import json
 import os
+import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -44,6 +46,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import Agg
 from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
 from nemo.collections.tts.models.easy_magpietts_inference import EasyModelInferenceParameters
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
+from nemo.collections.tts.modules.magpietts_modules import EOSDetectionMethod
 from nemo.collections.tts.parts.utils.tts_dataset_utils import normalize_volume, stack_tensors
 from nemo.utils import logging
 
@@ -1192,6 +1195,10 @@ class EasyMagpieMultiturnUserAudioInferenceRunner(BaseInferenceRunner):
         padded_lens = user_audio_lens.new_full(user_audio_lens.shape, min_len)
         return padded_audio, padded_lens
 
+    def _streaming_init(self, **kwargs):
+        """Create the streaming state for one sample (subclasses may extend the cache before the first turn)."""
+        return self.model.streaming_init(**kwargs)
+
     def _run_multiturn_generation(self, batch: Dict[str, Any]):
         model = self.model
         device = model.device
@@ -1246,7 +1253,7 @@ class EasyMagpieMultiturnUserAudioInferenceRunner(BaseInferenceRunner):
                 ctx_toks[b, : len(ctx_text_ids)] = torch.tensor(ctx_text_ids, dtype=torch.long, device=device)
 
             params = self.config.model_inference_parameters
-            state = model.streaming_init(
+            state = self._streaming_init(
                 context_audio_codes=codes,
                 context_audio_codes_lens=codes_lens,
                 context_text_tokens=ctx_toks,
@@ -2184,3 +2191,382 @@ class EasyMagpieMultiturnUserAudioInferenceRunner(BaseInferenceRunner):
                 gt_stereo,
                 sample_rate,
             )
+
+
+# ---------------------------------------------------------------------------
+# Long-form chunked inference (--easy_magpie_inference_mode longform_chunked)
+# ---------------------------------------------------------------------------
+
+# A period after one of these words (or after a single letter) does not end a sentence.
+_NON_FINAL_ABBREVIATIONS = {
+    'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'mt', 'jr', 'sr', 'capt', 'col', 'gen', 'lt', 'sgt', 'rev', 'hon', 'gov',
+    'sen', 'rep', 'vs', 'etc', 'no',
+}  # fmt: skip
+
+LONGFORM_CARRY_MODES = ("full_audio_only", "tail", "none")
+
+
+def split_sentences(text: str) -> List[str]:
+    """Split text into sentences, keeping each sentence's final punctuation and closing quotes/brackets."""
+    text = ' '.join(text.split())
+    sentences, last = [], 0
+    for match in re.finditer(r"""([.!?]+["'”’)\]]*)(\s+)""", text):
+        word = text[last : match.start(1)].split(' ')[-1].lower().strip('"\'([')
+        if match.group(1)[0] == '.' and (word in _NON_FINAL_ABBREVIATIONS or re.fullmatch(r'[a-z]', word)):
+            continue
+        sentences.append(text[last : match.end(1)])
+        last = match.end()
+    return sentences + ([text[last:]] if last < len(text) else [])
+
+
+def chunk_text_by_words(text: str, min_words: int = 40, max_words: int = 60) -> List[str]:
+    """Group whole sentences into chunks of ``min_words``..``max_words`` words.
+
+    A sentence longer than ``max_words`` is first cut at its last clause punctuation (``;:,``) within the limit,
+    or hard at ``max_words``. Dynamic programming then picks chunk boundaries that keep every chunk within the
+    range when possible and close to the middle of it (squared deviation; a chunk below ``min_words`` costs 1e4).
+    """
+    fragments = []
+    for sentence in split_sentences(text):
+        words = sentence.split()
+        while len(words) > max_words:
+            cuts = [i + 1 for i, word in enumerate(words[:max_words]) if re.search(r'[;:,]["\'”’)]*$', word)]
+            cut = cuts[-1] if cuts else max_words
+            fragments.append(' '.join(words[:cut]))
+            words = words[cut:]
+        if words:
+            fragments.append(' '.join(words))
+    sizes, n, middle = [len(f.split()) for f in fragments], len(fragments), (min_words + max_words) / 2
+    best, previous = [0.0] + [float('inf')] * n, [0] * (n + 1)
+    for j in range(1, n + 1):
+        total = 0
+        for i in range(j - 1, -1, -1):
+            total += sizes[i]
+            if total > max_words:
+                break
+            cost = best[i] + (total - middle) ** 2 + (1e4 if total < min_words else 0)
+            if cost < best[j]:
+                best[j], previous[j] = cost, i
+    chunks, j = [], n
+    while j:
+        chunks.append(' '.join(fragments[previous[j] : j]))
+        j = previous[j]
+    return chunks[::-1]
+
+
+def espeak_ipa(text: str, voice: str = "en-us") -> str:
+    """espeak-ng IPA of ``text``, whitespace-normalized; '' when espeak-ng gives nothing.
+
+    The text goes to espeak-ng on stdin, not argv, so a chunk starting with '-' is not parsed as an option.
+    """
+    try:
+        result = subprocess.run(['espeak-ng', '-q', '--ipa', '-v', voice], input=text, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise RuntimeError("Forced espeak IPA phonemes need the espeak-ng binary on PATH.") from e
+    return ' '.join(result.stdout.split())
+
+
+@dataclass
+class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
+    """Configuration for chunked long-form EasyMagpie inference (see EasyMagpieLongformInferenceRunner).
+
+    Attributes:
+        chunk_min_words: Minimum words per chunk (whole sentences per chunk).
+        chunk_max_words: Maximum words per chunk.
+        carry: How the previous chunk conditions the next one: 'full_audio_only', 'tail' or 'none'.
+        tail_steps: Number of carried positions for carry='tail'.
+        user_silence_steps: Length of the silent user turn before each chunk, in decoder steps; None uses
+            5 (4 for carry='tail').
+        reference_bias: Additive attention bias on the context-audio (reference) keys at every single-position
+            backbone forward of a chunk; 0 disables it.
+        force_espeak_ipa: Feed the espeak-ng IPA of each chunk as its phoneme stream instead of predicting it
+            (a chunk with empty espeak-ng output uses predicted phonemes).
+        espeak_voice: espeak-ng voice used with force_espeak_ipa.
+        eos_detection_method: None (stop on EOS in any codebook) or 'multinomial_zero_cb'.
+    """
+
+    chunk_min_words: int = 40
+    chunk_max_words: int = 60
+    carry: str = "full_audio_only"
+    tail_steps: int = 100
+    user_silence_steps: Optional[int] = None
+    reference_bias: float = 0.0
+    force_espeak_ipa: bool = False
+    espeak_voice: str = "en-us"
+    eos_detection_method: Optional[str] = None
+
+    def __post_init__(self):
+        if self.carry not in LONGFORM_CARRY_MODES:
+            raise ValueError(f"carry must be one of {LONGFORM_CARRY_MODES}, got {self.carry!r}")
+        if not 0 < self.chunk_min_words <= self.chunk_max_words:
+            raise ValueError(f"Invalid chunk word range {self.chunk_min_words},{self.chunk_max_words}")
+        if self.eos_detection_method not in (None, EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value):
+            raise ValueError(
+                f"longform_chunked supports eos_detection_method None or 'multinomial_zero_cb', "
+                f"got {self.eos_detection_method!r}"
+            )
+        if self.user_silence_steps is None:
+            self.user_silence_steps = 4 if self.carry == "tail" else 5
+
+    def build_identifier(self) -> str:
+        carry = f"tail{self.tail_steps}" if self.carry == "tail" else self.carry
+        return "_".join(
+            [
+                super().build_identifier(),
+                f"Longform_W{self.chunk_min_words}-{self.chunk_max_words}",
+                f"Carry_{carry}",
+                f"RefBias{self.reference_bias}",
+                f"IPA_{'espeak' if self.force_espeak_ipa else 'pred'}",
+                f"EOS_{self.eos_detection_method or 'any'}",
+            ]
+        )
+
+
+class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRunner):
+    """Chunked long-form EasyMagpie inference on the multiturn user-audio path.
+
+    Each manifest row's ``text`` is split into sentence-aligned chunks (chunk_text_by_words). Every chunk is
+    generated as one agent turn from a fresh cache: the row's context audio (the only voice reference), then the
+    carried previous chunk (if any), a silent user turn, and the chunk text. The chunk waveforms are concatenated
+    as they are (no crossfade) into predicted_audio_<idx>.wav, so evaluation scores one file per manifest row.
+    Per-chunk waveforms and a JSON summary per row are written to longform_chunks/.
+
+    Carry modes:
+        full_audio_only: the previous chunk's own backbone inputs (silent user turn, warmup and generation
+            steps) with their text- and phoneme-channel inputs subtracted (only the conditional CFG row carries
+            them), i.e. its audio and user-turn channels, prefilled after the reference.
+        tail: the same audio-only inputs without the last position, last ``tail_steps`` positions only.
+        none: chunks are generated independently.
+    After a carry the first audio step continues from the carried audio (no audio BOS).
+    """
+
+    produces_turn_level_evaluation: bool = False
+
+    def __init__(self, model, config: EasyMagpieLongformInferenceConfig):
+        super().__init__(model, config)
+        if config.reference_bias and not hasattr(model.decoder, "decode_key_bias"):
+            raise ValueError("reference_bias needs the NemotronH decoder backend.")
+        if config.force_espeak_ipa and model.phoneme_tokenizer is None:
+            raise ValueError("force_espeak_ipa needs a model with a phoneme tokenizer.")
+        if config.eos_detection_method is not None and not config.use_local_transformer:
+            raise ValueError(f"eos_detection_method={config.eos_detection_method} needs --use_local_transformer.")
+        # Per-chunk state shared with _streaming_init.
+        self._carry: Optional[torch.Tensor] = None  # inputs the next chunk prefills
+        self._chunk_phonemes: Optional[List[int]] = None  # forced IPA tokens of the current chunk
+        self._chunk_inputs: List[torch.Tensor] = []  # backbone inputs of the current chunk
+        self._chunk_state = None
+        self._chunk_start_position = 0
+
+    def create_dataset(
+        self,
+        dataset_meta: dict,
+        context_duration_min: Optional[float] = None,
+        context_duration_max: Optional[float] = None,
+    ) -> EasyMagpieMultiturnUserAudioDataset:
+        manifest_path, audio_dir = self._read_and_cache_manifest(dataset_meta)
+        logging.info("Creating long-form chunked inference dataset for decoder-only model")
+        # Context audio is used as stored (no volume normalization).
+        return EasyMagpieMultiturnUserAudioDataset(
+            manifest_path=manifest_path, audio_dir=audio_dir, model=self.model, max_eval_turns=1, normalize_audio=False
+        )
+
+    @staticmethod
+    def _left_pad_raw_audio_if_short(user_audio, user_audio_lens, min_len):
+        """The silent user turn length is set by user_silence_steps; never pad it."""
+        return user_audio, user_audio_lens
+
+    def _streaming_init(self, **kwargs):
+        """Fresh cache with the reference, then the carried previous chunk; arms the reference bias and recording."""
+        model = self.model
+        if self._chunk_phonemes is not None:
+            tokenizer = model.phoneme_tokenizer
+            tokens = [tokenizer.bos_token_id] + self._chunk_phonemes + [tokenizer.eos_token_id]
+            kwargs.update(
+                phoneme_input_type="gt",
+                gt_phoneme_tokens=torch.tensor([tokens], dtype=torch.long, device=model.device),
+                gt_phoneme_tokens_lens=torch.tensor([len(tokens)], dtype=torch.long, device=model.device),
+            )
+        state = model.streaming_init(eos_detection_method=self.config.eos_detection_method, **kwargs)
+        if self.config.reference_bias:
+            model.decoder.decode_key_bias = (int(state.cache_seq_len), float(self.config.reference_bias))
+        if self._carry is not None:
+            self._prefill(state, self._carry)
+            state.audio_steps.fill_(1)
+        if self.config.carry != "none":
+            state.text_phoneme_input_log = []
+        self._chunk_inputs.clear()
+        self._chunk_start_position = int(state.cache_seq_len)
+        self._chunk_state = state
+        return state
+
+    def _prefill(self, state, inputs_embeds: torch.Tensor) -> None:
+        """Run ``inputs_embeds`` (all CFG rows) through the backbone into the streaming cache."""
+        start = int(state.cache_seq_len)
+        out = self.model.forward(
+            inputs_embeds=inputs_embeds,
+            attention_mask=None,
+            use_cache=True,
+            past_key_values=state.past_key_values,
+            cache_position=torch.arange(start, start + inputs_embeds.shape[1], device=inputs_embeds.device),
+        )
+        state.past_key_values, state.last_hidden = out.past_key_values, out.last_hidden_state[:, -1:].clone()
+        state.cache_seq_len += inputs_embeds.shape[1]
+
+    def _record_decoder_input(self, module, args, kwargs):
+        self._chunk_inputs.append(kwargs["inputs_embeds"].detach().clone())
+
+    def _next_carry(self, state) -> Optional[torch.Tensor]:
+        """Audio-only inputs of the chunk just generated, cut to the carry mode."""
+        if self.config.carry == "none":
+            return None
+        x = torch.cat(self._chunk_inputs, dim=1).clone()
+        text = torch.zeros(x.shape[1], x.shape[2], device=x.device)
+        phoneme = torch.zeros_like(text)
+        for position, text_input, phoneme_input in state.text_phoneme_input_log:
+            if text_input is not None:
+                text[position - self._chunk_start_position] += text_input[0]
+            if phoneme_input is not None:
+                phoneme[position - self._chunk_start_position] += phoneme_input[0]
+        x[0] -= (text + phoneme).to(x.dtype)  # row 0 = conditional row of batch item 0
+        if self.config.carry == "tail":
+            x = x[:, :-1][:, -self.config.tail_steps :]
+        return x
+
+    def _generate_chunk(self, dataset: EasyMagpieMultiturnUserAudioDataset, record: dict, text: str):
+        """Generate one chunk and set the carry for the next one.
+
+        Returns:
+            (waveform, codes or None, summary dict, context waveform) on CPU.
+        """
+        model = self.model
+        batch = dataset.collate_fn([dict(record, text=[text])])
+        silence = torch.zeros(
+            1, self.config.user_silence_steps * int(model.codec_model_samples_per_frame * model.frame_stacking_factor)
+        )
+        batch["user_audio_turns"] = [silence]
+        batch["user_audio_turns_lens"] = [torch.tensor([silence.size(1)], dtype=torch.long)]
+        batch = self._move_batch_to_device(batch, model.device)
+
+        ipa = espeak_ipa(text, self.config.espeak_voice) if self.config.force_espeak_ipa else ""
+        self._chunk_phonemes = model.phoneme_tokenizer.encode(ipa) if ipa else None
+        carried_positions = 0 if self._carry is None else int(self._carry.shape[1])
+        hook = None
+        if self.config.carry != "none":
+            hook = model.decoder.register_forward_pre_hook(self._record_decoder_input, with_kwargs=True)
+        try:
+            output, turn_frame_ranges, _, _, generated_codes = self._run_multiturn_generation(batch)
+            with torch.inference_mode():
+                self._carry = self._next_carry(self._chunk_state)
+        finally:
+            if hook is not None:
+                hook.remove()
+            if self.config.reference_bias:
+                model.decoder.decode_key_bias = None
+            self._chunk_inputs, self._chunk_state = [], None
+
+        wave = output.audio[0, : int(output.audio_len[0])].float().cpu()
+        _, start_frame, end_frame = turn_frame_ranges[0]
+        codes = None if generated_codes is None else generated_codes[0, :, start_frame:end_frame].detach().cpu()
+        sample_rate = getattr(model, "output_sample_rate", model.sample_rate)
+        summary = {
+            "text": text,
+            "words": len(text.split()),
+            "duration_sec": wave.numel() / sample_rate,
+            "audio_steps": (end_frame - start_frame) // model.frame_stacking_factor,
+            "phoneme_source": "espeak" if self._chunk_phonemes else "predicted",
+            "phoneme_tokens": len(self._chunk_phonemes) if self._chunk_phonemes else len(output.phoneme_tokens[0]),
+            "carried_positions": carried_positions,
+        }
+        context = batch["context_audio"][0, : int(batch["context_audio_lengths"][0])].float().cpu()
+        return wave, codes, summary, context
+
+    def run_inference_on_dataset(
+        self,
+        dataset: EasyMagpieMultiturnUserAudioDataset,
+        output_dir: str,
+        manifest_records: Optional[List[dict]] = None,
+        audio_base_dir: Optional[str] = None,
+        save_cross_attention_maps: bool = True,
+        save_context_audio: bool = True,
+        save_predicted_codes: bool = True,
+    ) -> Tuple[List[dict], List[str], List[str]]:
+        manifest_records, audio_base_dir = self._resolve_manifest_and_audio_dir(manifest_records, audio_base_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        self._delete_old_generated_files(output_dir)
+        chunk_dir = os.path.join(output_dir, "longform_chunks")
+        os.makedirs(chunk_dir, exist_ok=True)
+        sample_rate = getattr(self.model, "output_sample_rate", self.model.sample_rate)
+
+        rtf_metrics, audio_paths, code_paths, eval_records = [], [], [], []
+        for idx in range(len(dataset)):
+            record = dataset[idx]
+            text = record["text"] if isinstance(record["text"], str) else " ".join(record["text"])
+            chunks = chunk_text_by_words(text, self.config.chunk_min_words, self.config.chunk_max_words)
+            if not chunks:
+                raise ValueError(f"Manifest row {idx} has no text to synthesize.")
+            logging.info(f"Long-form sample {idx + 1}/{len(dataset)}: {len(text.split())} words, {len(chunks)} chunks")
+
+            start_time = time.time()
+            self._carry = None
+            waves, codes, summaries = [], [], []
+            for chunk_idx, chunk in enumerate(chunks):
+                wave, chunk_codes, summary, context = self._generate_chunk(dataset, record, chunk)
+                summary.update(chunk=chunk_idx, start_sample=sum(w.numel() for w in waves), num_samples=wave.numel())
+                sf.write(os.path.join(chunk_dir, f"item_{idx}_chunk_{chunk_idx:03d}.wav"), wave.numpy(), sample_rate)
+                waves.append(wave)
+                codes.append(chunk_codes)
+                summaries.append(summary)
+                logging.info(
+                    f"  chunk {chunk_idx + 1}/{len(chunks)}: {summary['words']} words, "
+                    f"{summary['duration_sec']:.1f}s, {summary['audio_steps']} audio steps"
+                )
+            self._carry = None
+            elapsed = time.time() - start_time
+
+            full_wave = torch.cat(waves)
+            predicted_audio_path = os.path.join(output_dir, f"predicted_audio_{idx}.wav")
+            sf.write(predicted_audio_path, full_wave.numpy(), sample_rate)
+            audio_paths.append(predicted_audio_path)
+            if save_predicted_codes and all(c is not None for c in codes):
+                code_path = os.path.join(output_dir, f"predicted_codes_{idx}.pt")
+                torch.save(torch.cat(codes, dim=-1).long(), code_path)
+                code_paths.append(code_path)
+
+            context_path = os.path.join(output_dir, f"context_audio_{idx}.wav")
+            sf.write(context_path, context.numpy(), self.model.sample_rate)
+            target_src = self._resolve_audio_path(record.get("audio_filepath"), audio_base_dir)
+            if target_src is None or not os.path.exists(target_src):
+                target_src = context_path  # no ground truth: keep the evaluator's gt metrics defined
+            self._copy_file(target_src, os.path.join(output_dir, f"target_audio_{idx}.wav"), required=True)
+
+            eval_record = {
+                "audio_filepath": f"target_audio_{idx}.wav",
+                "context_audio_filepath": f"context_audio_{idx}.wav",
+                "text": text,
+                "speaker": record.get("speaker", str(idx)),
+                "source_sample_idx": idx,
+                "num_chunks": len(chunks),
+            }
+            for key in ("original_text", "normalized_text"):
+                if key in record:
+                    eval_record[key] = record[key]
+            eval_records.append(eval_record)
+            with open(os.path.join(chunk_dir, f"item_{idx}.json"), "w", encoding="utf-8") as f:
+                json.dump({"sample_rate": sample_rate, "chunks": summaries}, f, indent=1, ensure_ascii=False)
+
+            audio_seconds = full_wave.numel() / sample_rate
+            rtf_metrics.append(
+                {
+                    "inference_time": elapsed,
+                    "audio_seconds": audio_seconds,
+                    "rtf": elapsed / audio_seconds if audio_seconds > 0 else 0.0,
+                }
+            )
+
+        self.evaluation_audio_dir = output_dir
+        self.evaluation_manifest_path = os.path.join(output_dir, "longform_manifest.jsonl")
+        self.evaluation_manifest_records = eval_records
+        with open(self.evaluation_manifest_path, "w", encoding="utf-8") as f:
+            for eval_record in eval_records:
+                f.write(json.dumps(eval_record, ensure_ascii=False) + "\n")
+        return rtf_metrics, audio_paths, code_paths

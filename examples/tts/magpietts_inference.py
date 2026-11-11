@@ -428,6 +428,9 @@ def main(argv=None):
         _configure_cuda_for_rank()
         if args.batch_size > 1:
             parser.error("--easy_magpie_inference_mode multiturn_user_audio requires --batch_size 1.")
+    is_longform = args.model_type == 'easy_magpie' and args.easy_magpie_inference_mode == 'longform_chunked'
+    if is_longform and args.batch_size > 1:
+        parser.error("--easy_magpie_inference_mode longform_chunked requires --batch_size 1.")
 
     if args.deterministic:
         seed_all(seed=9)

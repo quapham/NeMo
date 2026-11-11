@@ -39,6 +39,7 @@ from nemo.collections.tts.modules.audio_codec_modules import VectorQuantizerInde
 from nemo.collections.tts.modules.magpietts_modules import (
     CharAwareSubwordEncoder,
     CodecHelper,
+    EOSDetectionMethod,
     LocalTransformerHelper,
     LocalTransformerType,
     SpecialAudioToken,
@@ -98,6 +99,7 @@ class StreamingConfig:
         phoneme_input_type: 'gt' or 'pred' for phoneme tokens.
         phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
         dummy_context_embedding_unconditional: Unconditional embedding for CFG (if enabled).
+        eos_detection_method: None (stop on EOS in any codebook) or 'multinomial_zero_cb' (see streaming_init).
     """
 
     batch_size: int
@@ -113,6 +115,7 @@ class StreamingConfig:
     dummy_context_embedding_unconditional: Optional[torch.Tensor]
     phoneme_temperature: Optional[float] = None
     phoneme_topk: Optional[int] = None
+    eos_detection_method: Optional[str] = None
 
 
 @dataclass
@@ -162,6 +165,9 @@ class StreamingState:
     gt_phoneme_lens: Optional[torch.Tensor] = None  # (B,) lengths after stacking
     gt_audio_embeddings: Optional[torch.Tensor] = None  # (B, T', E) pre-computed GT audio embeddings
     gt_audio_lens: Optional[torch.Tensor] = None  # (B,) lengths after stacking
+    # When a list, each streaming step appends (cache position, text input, phoneme input): what the text and phoneme
+    # channels added to that step's input embedding for the conditional rows, each (B, E), or None when absent.
+    text_phoneme_input_log: Optional[List[Tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]]] = None
 
 
 @dataclass
@@ -1471,9 +1477,11 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         use_local_transformer_for_inference: bool,
         use_cfg: bool,
         cfg_scale: float,
+        zero_cb_eos: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sample audio codes from logits using either local transformer or parallel sampling.
+        ``zero_cb_eos`` (local transformer only) selects the 'multinomial_zero_cb' EOS rule.
 
         Returns:
             audio_codes_next: Sampled codes with temperature/topk (B, num_codebooks)
@@ -1489,6 +1497,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                     cfg_scale=cfg_scale,
                     use_kv_cache=False,
                     sanitize_logits=True,
+                    zero_cb_eos=zero_cb_eos,
                 )
                 # Base class returns (B, C, S); flatten to (B, C*S) for downstream code
                 audio_codes_next = audio_codes_next.permute(0, 2, 1)
@@ -1531,6 +1540,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         use_inference_mode: bool = True,
         phoneme_temperature: Optional[float] = None,
         phoneme_topk: Optional[int] = None,
+        eos_detection_method: Optional[str] = None,
     ) -> StreamingState:
         """
         Initialize streaming TTS inference state.
@@ -1574,10 +1584,17 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             gt_audio_codes: Optional GT audio codes (B, C*S, T) already stacked with BOS/EOS,
                 input portion ([:, :, :-1]) for teacher forcing. Pre-processed by caller.
             gt_audio_codes_lens: Lengths of GT audio codes (B,) after stacking.
+            eos_detection_method: None (default) stops on EOS in any codebook. 'multinomial_zero_cb' lets the code
+                sampled at local-transformer index 0 decide whether a frame is EOS (see
+                LocalTransformerHelper.sample_autoregressive); requires use_local_transformer.
 
         Returns:
             StreamingState: Initial state for streaming inference.
         """
+        if eos_detection_method not in (None, EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value):
+            raise ValueError(f"Unsupported eos_detection_method for streaming inference: {eos_detection_method}")
+        if eos_detection_method is not None and not use_local_transformer:
+            raise ValueError(f"eos_detection_method={eos_detection_method} requires use_local_transformer=True")
         grad_ctx = torch.inference_mode if use_inference_mode else torch.no_grad
         with grad_ctx():
             batch_size = context_audio_codes.size(0)
@@ -1681,6 +1698,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 phoneme_input_type=phoneme_input_type,
                 phoneme_sampling_method=phoneme_sampling_method,
                 dummy_context_embedding_unconditional=dummy_context_embedding_unconditional,
+                eos_detection_method=eos_detection_method,
             )
 
             state = StreamingState(
@@ -1914,6 +1932,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         needs_audio = (~needs_context) & (turn_text_tokens_seen >= streaming_speech_delay) & (~state.finished)
 
         next_input = torch.zeros(batch_size, 1, self.cfg.embedding_dim, device=device)
+        text_input, phoneme_input = None, None  # channel contributions, kept for state.text_phoneme_input_log
 
         # --- Context phase items: use next context embedding ---
         if needs_context.any():
@@ -1946,7 +1965,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
             is_eos_token = (text_tokens == self.eos_id) & needs_text  # (B,) bool
             text_add_mask = needs_text.view(batch_size, 1, 1).float()
-            next_input = next_input + text_embedded * text_add_mask
+            text_input = text_embedded * text_add_mask
+            next_input = next_input + text_input
             state.text_finished = state.text_finished | is_eos_token
 
         elif text_tokens is None:
@@ -2002,6 +2022,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
                     state.phoneme_stream_ended = state.phoneme_stream_ended | state.phoneme_eos_detected
 
+                phoneme_input = phoneme_emb
                 next_input = next_input + phoneme_emb
 
         # --- Audio embedding for audio phase items ---
@@ -2045,6 +2066,15 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                 dtype=next_input.dtype,
             )
             next_input = next_input + user_audio_cond_emb
+
+        if state.text_phoneme_input_log is not None:
+            state.text_phoneme_input_log.append(
+                (
+                    int(state.cache_seq_len),
+                    None if text_input is None else text_input[:, 0],
+                    None if phoneme_input is None else phoneme_input[:, 0],
+                )
+            )
 
         # --- Handle CFG ---
         if state.config.use_cfg:
@@ -2258,6 +2288,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             use_local_transformer_for_inference=state.config.use_local_transformer,
             use_cfg=state.config.use_cfg,
             cfg_scale=state.config.cfg_scale,
+            zero_cb_eos=state.config.eos_detection_method == EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value,
         )
 
         return audio_codes_next, all_codes_next_argmax

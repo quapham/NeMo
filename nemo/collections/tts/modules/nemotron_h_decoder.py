@@ -1414,6 +1414,9 @@ class NemotronHModel(nn.Module):
         self.norm_f = NemotronHRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         self.gradient_checkpointing = False
+        # Inference-only: (num_keys, bias). When set, single-position forwards (decode steps) add `bias` to the
+        # attention scores of the first `num_keys` cached positions in every attention layer (sdpa/eager only).
+        self.decode_key_bias: Optional[Tuple[int, float]] = None
         self._init_weights()
 
     def _init_weights(self):
@@ -1508,6 +1511,8 @@ class NemotronHModel(nn.Module):
 
         # Create causal mask for attention layers
         causal_mask = self._create_causal_mask(attention_mask, inputs_embeds, cache_position)
+        if self.decode_key_bias is not None and inputs_embeds.shape[1] == 1:
+            causal_mask = self._add_decode_key_bias(causal_mask)
         mamba_mask = self._update_mamba_mask(attention_mask, cache_position)
 
         all_hidden_states = () if output_hidden_states else None
@@ -1590,6 +1595,15 @@ class NemotronHModel(nn.Module):
                 causal_mask[..., :mask_length] = causal_mask[..., :mask_length].masked_fill(padding_mask, min_dtype)
 
         return causal_mask
+
+    def _add_decode_key_bias(self, causal_mask):
+        """Add ``decode_key_bias`` to the additive mask of a single-position forward."""
+        if causal_mask is None:
+            raise RuntimeError("decode_key_bias needs an additive attention mask (not flash_attention_2).")
+        num_keys, bias = self.decode_key_bias
+        key_bias = torch.zeros(causal_mask.shape[-1], dtype=torch.float32, device=causal_mask.device)
+        key_bias[:num_keys] += bias
+        return (causal_mask.float() + key_bias).to(causal_mask.dtype)
 
     def _update_mamba_mask(self, attention_mask, cache_position):
         """

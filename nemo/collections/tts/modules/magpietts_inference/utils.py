@@ -43,6 +43,8 @@ from nemo.collections.tts.modules.magpietts_inference.inference import (
     BaseInferenceRunner,
     EasyMagpieInferenceConfig,
     EasyMagpieInferenceRunner,
+    EasyMagpieLongformInferenceConfig,
+    EasyMagpieLongformInferenceRunner,
     EasyMagpieMultiturnUserAudioInferenceConfig,
     EasyMagpieMultiturnUserAudioInferenceRunner,
     MagpieInferenceConfig,
@@ -1335,7 +1337,9 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         '--easy_magpie_inference_mode',
         type=str,
         default='single_turn',
-        choices=['single_turn', 'multiturn_user_audio'],
+        choices=['single_turn', 'multiturn_user_audio', 'longform_chunked'],
+        help='longform_chunked: split each manifest text into sentence-aligned chunks, generate them one after '
+        'another (see the "Long-form chunked inference" options) and score one concatenated file per row.',
     )
     group.add_argument('--max_eval_turns', type=int, default=6)
     group.add_argument('--no_save_debug_multiturn_audio', action='store_true')
@@ -1364,6 +1368,50 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         '--disable_cas_for_context_text',
         action='store_true',
         help='Skip CAS embeddings for context text when loading legacy EasyMagpieTTS models',
+    )
+
+    longform = parser.add_argument_group(
+        'Long-form chunked inference (--easy_magpie_inference_mode longform_chunked; batch_size 1). '
+        'The EOS rule is --eos_detection_method: unset = stop on EOS in any codebook, '
+        'multinomial_zero_cb = the code sampled for codebook 0 decides (needs --use_local_transformer).'
+    )
+    longform.add_argument(
+        '--longform_chunk_words',
+        type=str,
+        default='40,60',
+        help='MIN,MAX words per chunk; chunks hold whole sentences (an over-long sentence is cut at a comma).',
+    )
+    longform.add_argument(
+        '--longform_carry',
+        type=str,
+        default='full_audio_only',
+        choices=['full_audio_only', 'tail', 'none'],
+        help='How the previous chunk conditions the next one: full_audio_only = the whole previous chunk is '
+        'prefilled after the reference without its text/phoneme channels; tail = only its last '
+        '--longform_tail_steps positions of that; none = independent chunks.',
+    )
+    longform.add_argument('--longform_tail_steps', type=int, default=100, help='Carried positions for tail.')
+    longform.add_argument(
+        '--longform_user_silence_steps',
+        type=int,
+        default=None,
+        help='Silent user turn before each chunk, in decoder steps (default 5, or 4 with --longform_carry tail).',
+    )
+    longform.add_argument(
+        '--longform_reference_bias',
+        type=float,
+        default=0.0,
+        help='Additive attention bias on the context-audio keys at every single-position decoder step (0 = off).',
+    )
+    longform.add_argument(
+        '--longform_force_espeak_ipa',
+        action='store_true',
+        help='Feed the espeak-ng IPA of each chunk as its phoneme stream instead of predicted phonemes '
+        '(text sent on stdin; a chunk with empty espeak-ng output keeps predicted phonemes). Unlike '
+        '--phoneme_input_type gt, this needs no "ipa" manifest field.',
+    )
+    longform.add_argument(
+        '--longform_espeak_voice', type=str, default='en-us', help='espeak-ng voice for --longform_force_espeak_ipa.'
     )
 
 
@@ -1396,11 +1444,10 @@ def _build_magpie_config(args) -> MagpieInferenceConfig:
 
 
 def _build_easy_magpie_config(args) -> EasyMagpieInferenceConfig:
-    cfg_cls = (
-        EasyMagpieMultiturnUserAudioInferenceConfig
-        if args.easy_magpie_inference_mode == 'multiturn_user_audio'
-        else EasyMagpieInferenceConfig
-    )
+    cfg_cls = {
+        'multiturn_user_audio': EasyMagpieMultiturnUserAudioInferenceConfig,
+        'longform_chunked': EasyMagpieLongformInferenceConfig,
+    }.get(args.easy_magpie_inference_mode, EasyMagpieInferenceConfig)
     kwargs = dict(
         model_inference_parameters=_build_inference_params_from_args(EasyModelInferenceParameters, args),
         batch_size=args.batch_size,
@@ -1416,6 +1463,19 @@ def _build_easy_magpie_config(args) -> EasyMagpieInferenceConfig:
             max_eval_turns=args.max_eval_turns,
             save_debug_multiturn_audio=not args.no_save_debug_multiturn_audio,
         )
+    elif cfg_cls is EasyMagpieLongformInferenceConfig:
+        chunk_min_words, chunk_max_words = (int(x) for x in args.longform_chunk_words.split(','))
+        kwargs.update(
+            chunk_min_words=chunk_min_words,
+            chunk_max_words=chunk_max_words,
+            carry=args.longform_carry,
+            tail_steps=args.longform_tail_steps,
+            user_silence_steps=args.longform_user_silence_steps,
+            reference_bias=args.longform_reference_bias,
+            force_espeak_ipa=args.longform_force_espeak_ipa,
+            espeak_voice=args.longform_espeak_voice,
+            eos_detection_method=args.eos_detection_method,
+        )
     return cfg_cls(**kwargs)
 
 
@@ -1426,4 +1486,6 @@ def _select_runner_cls(args):
         return MagpieInferenceRunner
     if args.easy_magpie_inference_mode == 'multiturn_user_audio':
         return EasyMagpieMultiturnUserAudioInferenceRunner
+    if args.easy_magpie_inference_mode == 'longform_chunked':
+        return EasyMagpieLongformInferenceRunner
     return EasyMagpieInferenceRunner

@@ -2885,6 +2885,8 @@ class MagpieTTSModel(ModelPT):
             argmax_eos_frame = self.find_eos_frame_index(audio_codes_argmax, eos_detection_method)
             multinomial_eos_frame = self.find_eos_frame_index(audio_codes_multinomial, eos_detection_method)
             return min(argmax_eos_frame, multinomial_eos_frame)
+        elif sampling_type == "multinomial":
+            return self.find_eos_frame_index(audio_codes_multinomial, eos_detection_method)
         else:
             raise ValueError(f"Invalid EOS detection method: {eos_detection_method}")
 
