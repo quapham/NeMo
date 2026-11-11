@@ -324,21 +324,7 @@ def load_evaluation_models(
     }
 
     models['asr_model'] = load_asr_transcriber(asr_model_name, asr_model_type, device)
-
-    if sv_model_type == "wavlm":
-        models['feature_extractor'] = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
-        models['sv_model'] = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv').to(device).eval()
-    else:
-        models['sv_model'] = (
-            nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large').to(device).eval()
-        )
-
-    logging.info("Loading `titanet_small` model...")
-    with logging.temp_verbosity(logging.ERROR):
-        models['sv_model_alternate'] = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
-            model_name='titanet_small'
-        )
-    models['sv_model_alternate'] = models['sv_model_alternate'].to(device).eval()
+    models.update(load_speaker_verification_models(sv_model_type, device))
 
     if with_prosody_metrics:
         logging.info("Loading emotion encoder for ESIM/EMS prosody metrics...")
@@ -356,6 +342,27 @@ def load_evaluation_models(
         except Exception as e:
             logging.warning(f"Emotion encoder could not be loaded: {e}. ESIM/EMS metrics will be set to NaN.")
 
+    return models
+
+
+def load_speaker_verification_models(sv_model_type="titanet", device="cuda") -> dict:
+    """Load the speaker-verification models: ``feature_extractor`` (WavLM only), ``sv_model`` and the alternate
+    ``titanet_small`` (``sv_model_alternate``)."""
+    models = {'feature_extractor': None}
+    if sv_model_type == "wavlm":
+        models['feature_extractor'] = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
+        models['sv_model'] = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv').to(device).eval()
+    else:
+        models['sv_model'] = (
+            nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name='titanet_large').to(device).eval()
+        )
+
+    logging.info("Loading `titanet_small` model...")
+    with logging.temp_verbosity(logging.ERROR):
+        models['sv_model_alternate'] = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
+            model_name='titanet_small'
+        )
+    models['sv_model_alternate'] = models['sv_model_alternate'].to(device).eval()
     return models
 
 
@@ -819,6 +826,7 @@ def evaluate(
 # ---------------------------------------------------------------------------
 
 LONGFORM_CHUNK_DIR = "longform_chunks"
+LONGFORM_FILEWISE_METRICS_TO_SAVE = ['pred_context_ssim_chunks', 'pred_context_ssim_chunks_alternate', 'num_chunks']
 LONGFORM_CHUNK_METRICS_FILE = "longform_chunk_metrics.json"
 _PYIN_SR, _PYIN_HOP = 16000, 320
 _JOIN_END_SEC, _JOIN_START_SEC = 3.5, 2.5  # last 3.5 s of chunk N vs first 2.5 s of chunk N+1
@@ -869,6 +877,8 @@ def compute_longform_chunk_metrics(
     strip_text_annotations_for_metrics: bool = False,
     device: str = "cuda",
     num_workers: int = 8,
+    with_join_pitch: bool = True,
+    output_dir: Optional[str] = None,
 ) -> dict:
     """Per-chunk ASR and join pitch of a longform_chunked output directory.
 
@@ -879,7 +889,9 @@ def compute_longform_chunk_metrics(
     first 2.5 s of the next chunk of the same item, over the voiced frames within 0.67x-1.5x of each chunk's median
     (longform_f0_stats); mean, median and % of joins where both medians exist.
 
-    Writes ``<generated_audio_dir>/longform_chunk_metrics.json`` (summary, chunks, joins) and returns it.
+    Writes ``longform_chunk_metrics.json`` (summary, chunks, joins) to ``output_dir`` (default:
+    ``generated_audio_dir``) and returns it. Each chunk row keeps the raw ASR output as ``asr_text``.
+    ``with_join_pitch=False`` skips the pitch part (no join keys).
     """
     chunk_dir = os.path.join(generated_audio_dir, LONGFORM_CHUNK_DIR)
     item_ids = sorted(int(f[5:-5]) for f in os.listdir(chunk_dir) if re.fullmatch(r"item_\d+\.json", f))
@@ -894,24 +906,26 @@ def compute_longform_chunk_metrics(
         raise ValueError(f"No long-form chunks found in {chunk_dir}")
     paths = [c["path"] for c in chunks]
 
-    # Pitch on CPU workers (spawned when CUDA is already initialized in this process).
-    start_time = time.time()
-    context = "spawn" if torch.cuda.is_initialized() else "fork"
-    with multiprocessing.get_context(context).Pool(max(1, num_workers)) as pool:
-        f0 = pool.map(longform_f0_stats, paths, chunksize=1)
-    logging.info(f"Long-form join pitch for {len(paths)} chunks in {time.time() - start_time:.0f}s")
+    f0 = [{} for _ in paths]
+    if with_join_pitch:  # pitch on CPU workers (spawned when CUDA is already initialized in this process)
+        start_time = time.time()
+        context = "spawn" if torch.cuda.is_initialized() else "fork"
+        with multiprocessing.get_context(context).Pool(max(1, num_workers)) as pool:
+            f0 = pool.map(longform_f0_stats, paths, chunksize=1)
+        logging.info(f"Long-form join pitch for {len(paths)} chunks in {time.time() - start_time:.0f}s")
 
     asr_model = load_asr_transcriber(asr_model_name, asr_model_type, device)
-    hyps = asr_model.transcribe(audio_paths=paths, language=language, batch_size=asr_batch_size)
+    asr_texts = asr_model.transcribe(audio_paths=paths, language=language, batch_size=asr_batch_size)
     del asr_model
     text_processor = get_text_processor(language)
     clean = strip_text_annotations_from_text if strip_text_annotations_for_metrics else (lambda x: x)
     refs = [text_processor.process_text_for_wer(clean(c["text"])) for c in chunks]
-    hyps = [text_processor.process_text_for_wer(clean(h)) for h in hyps]
+    hyps = [text_processor.process_text_for_wer(clean(h)) for h in asr_texts]
 
-    for c, ref, hyp, stats in zip(chunks, refs, hyps, f0):
+    for c, ref, hyp, asr_text, stats in zip(chunks, refs, hyps, asr_texts, f0):
         del c["path"]
         c.update(
+            asr_text=asr_text,
             reference=ref,
             transcript=hyp,
             ref_chars=len(ref),
@@ -920,7 +934,7 @@ def compute_longform_chunk_metrics(
             **stats,
         )
     joins = []
-    for item in item_ids:
+    for item in item_ids if with_join_pitch else []:
         jumps = _join_jumps([c for c in chunks if c["item"] == item])
         joins += [dict(item=item, chunk=k, jump_semitones=j) for k, j in enumerate(jumps)]
     kept = [j["jump_semitones"] for j in joins if j["jump_semitones"] is not None]
@@ -933,16 +947,170 @@ def compute_longform_chunk_metrics(
         "longform_chunk_cer_avg": float(np.mean(cers)),
         "longform_chunks_cer_gt_3pct": int(sum(c > 0.03 for c in cers)),
         "longform_chunks_cer_gt_10pct": int(sum(c > 0.10 for c in cers)),
-        "longform_joins": len(joins),
-        "longform_join_jump_mean": float(np.mean(kept)) if kept else float('nan'),
-        "longform_join_jump_median": float(np.median(kept)) if kept else float('nan'),
-        "longform_join_jump_kept_pct": 100.0 * len(kept) / len(joins) if joins else float('nan'),
     }
+    if with_join_pitch:
+        summary.update(
+            longform_joins=len(joins),
+            longform_join_jump_mean=float(np.mean(kept)) if kept else float('nan'),
+            longform_join_jump_median=float(np.median(kept)) if kept else float('nan'),
+            longform_join_jump_kept_pct=100.0 * len(kept) / len(joins) if joins else float('nan'),
+        )
     result = dict(summary=summary, chunks=chunks, joins=joins)
-    with open(os.path.join(generated_audio_dir, LONGFORM_CHUNK_METRICS_FILE), "w", encoding="utf-8") as f:
+    output_dir = output_dir or generated_audio_dir
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, LONGFORM_CHUNK_METRICS_FILE), "w", encoding="utf-8") as f:
         json.dump(result, f, indent=1, ensure_ascii=False)
     logging.info(f"Long-form chunk metrics: {summary}")
     return result
+
+
+def evaluate_longform(
+    manifest_path,
+    audio_dir,
+    generated_audio_dir,
+    language="en",
+    sv_model_type="titanet",
+    asr_model_name="nvidia/parakeet-tdt-1.1b",
+    asr_model_type="nemo",
+    with_utmosv2=True,
+    strip_text_annotations_for_metrics=False,
+    asr_batch_size=32,
+    eou_batch_size=32,
+    device="cuda",
+    eou_model_name=None,
+    with_chunk_metrics=True,
+    output_dir=None,
+):
+    """evaluate() for longform_chunked outputs, without loading any whole long file into an ASR, SV or EoU model.
+
+    Files can be an hour long, which whole-file ASR (and the SV / EoU models) cannot hold in GPU memory. The chunk
+    files under longform_chunks/ are scored instead (compute_longform_chunk_metrics, the only ASR pass):
+
+    - cer / wer (filewise, cumulative): hypothesis = the chunk transcripts of a file joined in order, scored against
+      the file's full reference text with the usual normalizer; same keys and meaning as evaluate().
+    - ground-truth-audio ASR (cer_pred_gt_audio*, cer_gt_audio_cumulative, ...): would need whole-file ASR of the
+      target audio, so not computed (NaN).
+    - speaker similarity: whole-file keys (ssim_pred_context_avg, ssim_pred_gt_avg, ...) are NaN. Instead
+      ``ssim_pred_context_chunk_avg`` (+ ``_alternate``): per file, the chunk-duration-weighted mean of the cosine
+      similarity between each chunk and the context audio, averaged over files.
+    - utmosv2_avg: whole file as before (UTMOSv2 scores a fixed-length crop, so long files are memory-safe).
+    - EoU rates: classification of the file's last chunk against that chunk's text (the end of the file).
+    - FCD and prosody metrics: not computed.
+    With ``with_chunk_metrics`` the longform_* chunk summary (per-chunk ASR, join pitch) is added as well.
+    The chunk metrics JSON goes to ``output_dir`` (default: ``generated_audio_dir``).
+
+    Returns:
+        Tuple of (avg_metrics dict, filewise_metrics list), as evaluate().
+    """
+    start_time = time.time()
+    chunk_result = compute_longform_chunk_metrics(
+        generated_audio_dir,
+        language=language,
+        asr_model_name=asr_model_name,
+        asr_model_type=asr_model_type,
+        asr_batch_size=asr_batch_size,
+        strip_text_annotations_for_metrics=strip_text_annotations_for_metrics,
+        device=device,
+        with_join_pitch=with_chunk_metrics,
+        output_dir=output_dir,
+    )
+    audio_file_lists = find_generated_audio_files(generated_audio_dir)
+    records = read_manifest(manifest_path)
+    assert len(audio_file_lists) == len(records)
+    chunk_dir = os.path.join(generated_audio_dir, LONGFORM_CHUNK_DIR)
+    chunks_of = {}
+    for c in chunk_result["chunks"]:
+        chunks_of.setdefault(c["item"], []).append(c)
+
+    text_processor = get_text_processor(language)
+    clean = strip_text_annotations_from_text if strip_text_annotations_for_metrics else (lambda x: x)
+    models = load_speaker_verification_models(sv_model_type, device)
+    utmosv2_scores = compute_utmosv2_scores(generated_audio_dir, device) if with_utmosv2 else None
+    if with_utmosv2 and not UTMOSV2_AVAILABLE:
+        logging.warning("UTMOSv2 was requested but the UTMOSv2 library is not available; scores are NaN.")
+
+    rows, eou_items = [], []
+    for ridx, record in enumerate(records):
+        file_chunks = chunks_of[ridx]
+        chunk_paths = [os.path.join(chunk_dir, c["file"]) for c in file_chunks]
+        text_field = next((k for k in ("original_text", "normalized_text") if k in record), "text")
+        gt_text = text_processor.process_text_for_wer(clean(record[text_field]))
+        pred_text = text_processor.process_text_for_wer(clean(" ".join(c["asr_text"] for c in file_chunks)))
+        detailed_cer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=True)
+        detailed_wer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=False)
+        eou_items.append((chunk_paths[-1], text_processor.process_text_for_wer(clean(file_chunks[-1]["text"]))))
+
+        context_audio_filepath = _resolve_path(audio_dir, record.get('context_audio_filepath'))
+        durations = np.array([get_wav_file_duration(p) for p in chunk_paths])
+        ssim = {}
+        for key, model in (("pred_context_ssim_chunks", "sv_model"), ("pred_context_ssim_chunks_alternate", None)):
+            embed = partial(
+                extract_embedding,
+                model=models[model] if model else models["sv_model_alternate"],
+                extractor=models["feature_extractor"],
+                device=device,
+                sv_model_type=sv_model_type if model else "titanet",
+            )
+            with torch.inference_mode():
+                context_embedding = embed(audio_path=context_audio_filepath)
+                sims = [
+                    torch.nn.functional.cosine_similarity(embed(audio_path=p), context_embedding, dim=0).item()
+                    for p in chunk_paths
+                ]
+            ssim[key] = float(np.sum(durations * np.array(sims)) / durations.sum())
+
+        pred_audio_filepath = audio_file_lists[ridx]
+        nan = float('nan')
+        rows.append(
+            {
+                'gt_text': gt_text,
+                'pred_text': pred_text,
+                'gt_audio_text': None,
+                'detailed_cer': detailed_cer,
+                'detailed_wer': detailed_wer,
+                'cer': detailed_cer[0],
+                'cer_pred_gt_audio': nan,
+                'wer': detailed_wer[0],
+                'wer_pred_gt_audio': nan,
+                'pred_gt_ssim': nan,
+                'pred_context_ssim': nan,
+                'gt_context_ssim': nan,
+                'pred_gt_ssim_alternate': nan,
+                'pred_context_ssim_alternate': nan,
+                'gt_context_ssim_alternate': nan,
+                **ssim,
+                'gt_audio_filepath': _resolve_path(audio_dir, record.get('audio_filepath')),
+                'pred_audio_filepath': pred_audio_filepath,
+                'context_audio_filepath': context_audio_filepath,
+                'utmosv2': (utmosv2_scores.get(os.path.normpath(pred_audio_filepath), nan) if utmosv2_scores else nan),
+                'total_gen_audio_seconds': get_wav_file_duration(pred_audio_filepath),
+                'num_chunks': len(file_chunks),
+            }
+        )
+
+    eou_results = None
+    if language == "en":  # EoU supports English only, as in evaluate_dir
+        eou_kwargs = {"device": device}
+        if eou_model_name is not None:
+            eou_kwargs["model_name"] = eou_model_name
+        eou_results = classify_eou_batched(EoUClassifier(**eou_kwargs), eou_items, batch_size=eou_batch_size)
+    for ridx, row in enumerate(rows):
+        result = eou_results[ridx] if eou_results is not None else None
+        row['eou_type'] = result.eou_type.value if result else None
+        row['eou_trailing_duration'] = result.trailing_duration if result else float('nan')
+        row['eou_trail_rms_ratio'] = result.trail_rms_ratio if result else float('nan')
+
+    avg_metrics = compute_global_metrics(filewise_metrics=rows, device=device)
+    n = len(rows)
+    avg_metrics['ssim_pred_context_chunk_avg'] = sum(r['pred_context_ssim_chunks'] for r in rows) / n
+    avg_metrics['ssim_pred_context_chunk_avg_alternate'] = (
+        sum(r['pred_context_ssim_chunks_alternate'] for r in rows) / n
+    )
+    if with_chunk_metrics:
+        avg_metrics.update(chunk_result["summary"])
+    logging.info(f"evaluate_longform() completed in {time.time() - start_time:.1f}s")
+    filewise_metrics_to_save = list(FILEWISE_METRICS_TO_SAVE) + LONGFORM_FILEWISE_METRICS_TO_SAVE
+    return avg_metrics, [{k: m[k] for k in filewise_metrics_to_save if k in m} for m in rows]
 
 
 def compute_fcd(gt_audio_paths, predicted_codes_paths, codec_model_path, device="cuda"):
@@ -1119,12 +1287,42 @@ def main():
     parser.add_argument('--asr_model_type', type=str, default="nemo", choices=["nemo", "nemo_with_prompt", "whisper"])
     parser.add_argument('--asr_batch_size', type=int, default=32)
     parser.add_argument(
+        '--longform_rescore',
+        action='store_true',
+        help='Re-score a longform_chunked output end to end with evaluate_longform (file-level metrics from the chunk '
+        'files + chunk metrics): --generated_audio_dir is audio/repeat_<r>; --manifest_path and --audio_dir default '
+        'to its longform_manifest.jsonl and itself. Writes metrics.json, filewise_metrics.json and '
+        'longform_chunk_metrics.json to --output_dir.',
+    )
+    parser.add_argument('--output_dir', type=str, default=None, help='Where --longform_* modes write their JSON.')
+    parser.add_argument('--eou_batch_size', type=int, default=32, help='EoU batch size for --longform_rescore.')
+    parser.add_argument(
         '--update_metrics_json',
         type=str,
         default=None,
         help='With --longform_chunk_metrics_only: also add the summary to this <dataset>_metrics_<r>.json.',
     )
     args = parser.parse_args()
+
+    if args.longform_rescore:
+        output_dir = args.output_dir or args.generated_audio_dir
+        metrics, filewise = evaluate_longform(
+            manifest_path=args.manifest_path or os.path.join(args.generated_audio_dir, "longform_manifest.jsonl"),
+            audio_dir=args.audio_dir or args.generated_audio_dir,
+            generated_audio_dir=args.generated_audio_dir,
+            language=args.language,
+            asr_model_name=args.asr_model_name,
+            asr_model_type=args.asr_model_type,
+            asr_batch_size=args.asr_batch_size,
+            eou_batch_size=args.eou_batch_size,
+            strip_text_annotations_for_metrics=args.strip_text_annotations_for_metrics,
+            output_dir=output_dir,
+        )
+        with open(os.path.join(output_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
+        with open(os.path.join(output_dir, "filewise_metrics.json"), "w", encoding="utf-8") as f:
+            json.dump(filewise, f, indent=4, ensure_ascii=False)
+        return
 
     if args.longform_chunk_metrics_only:
         result = compute_longform_chunk_metrics(
@@ -1134,6 +1332,7 @@ def main():
             asr_model_type=args.asr_model_type,
             asr_batch_size=args.asr_batch_size,
             strip_text_annotations_for_metrics=args.strip_text_annotations_for_metrics,
+            output_dir=args.output_dir,
         )
         if args.update_metrics_json:
             with open(args.update_metrics_json) as f:

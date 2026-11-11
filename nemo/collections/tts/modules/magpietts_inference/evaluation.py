@@ -116,6 +116,36 @@ def evaluate_generated_audio_dir(
     return avg_metrics, filewise_metrics
 
 
+def evaluate_longform_generated_audio_dir(
+    manifest_path: str,
+    audio_dir: str,
+    generated_audio_dir: str,
+    config: EvaluationConfig,
+    with_chunk_metrics: bool = True,
+) -> Tuple[Dict[str, float], List[dict]]:
+    """evaluate_generated_audio_dir() for longform_chunked outputs (see evaluate_generated_audio.evaluate_longform).
+
+    ASR runs once, on the chunk files; FCD and prosody metrics are not computed.
+    """
+    logging.info(f"Evaluating long-form chunked audio from {generated_audio_dir} against manifest {manifest_path}")
+    return evaluate_generated_audio.evaluate_longform(
+        manifest_path=manifest_path,
+        audio_dir=audio_dir,
+        generated_audio_dir=generated_audio_dir,
+        language=config.language,
+        sv_model_type=config.sv_model,
+        asr_model_name=config.asr_model_name,
+        asr_model_type=config.asr_model_type,
+        with_utmosv2=config.with_utmosv2,
+        strip_text_annotations_for_metrics=config.strip_text_annotations_for_metrics,
+        asr_batch_size=config.asr_batch_size,
+        eou_batch_size=config.eou_batch_size,
+        device=config.device,
+        eou_model_name=config.eou_model_name,
+        with_chunk_metrics=with_chunk_metrics,
+    )
+
+
 def compute_mean_with_confidence_interval(
     metrics_list: List[dict],
     confidence: float = 0.95,

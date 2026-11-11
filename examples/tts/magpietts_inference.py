@@ -64,15 +64,13 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
-from nemo.collections.tts.modules.magpietts_inference.evaluate_generated_audio import (
-    compute_longform_chunk_metrics,
-    load_evalset_config,
-)
+from nemo.collections.tts.modules.magpietts_inference.evaluate_generated_audio import load_evalset_config
 from nemo.collections.tts.modules.magpietts_inference.evaluation import (
     DEFAULT_VIOLIN_METRICS,
     EvaluationConfig,
     compute_mean_with_confidence_interval,
     evaluate_generated_audio_dir,
+    evaluate_longform_generated_audio_dir,
 )
 from nemo.collections.tts.modules.magpietts_inference.inference import BaseInferenceConfig, BaseInferenceRunner
 from nemo.collections.tts.modules.magpietts_inference.utils import (
@@ -119,7 +117,8 @@ def run_inference_and_evaluation(
     clean_up_disk: bool = False,
     skip_evaluation: bool = False,
     ignore_manifest_language: bool = False,
-    longform_chunk_metrics: bool = False,
+    longform_chunked: bool = False,
+    longform_chunk_metrics: bool = True,
 ) -> Tuple[Optional[float], Optional[float]]:
     """Run inference and optional evaluation on specified datasets.
 
@@ -142,7 +141,9 @@ def run_inference_and_evaluation(
         clean_up_disk: Whether to clean up output directory after completion.
         skip_evaluation: Whether to skip evaluation (inference only mode).
         ignore_manifest_language: Whether dataset-level language should override manifest records.
-        longform_chunk_metrics: Whether to add per-chunk ASR and join pitch metrics (longform_chunked runner only).
+        longform_chunked: Whether the runner is longform_chunked: evaluation then scores the chunk files instead of
+            whole long files (evaluate_longform_generated_audio_dir).
+        longform_chunk_metrics: With longform_chunked, also report the per-chunk ASR and join pitch summary.
 
     Returns:
         Tuple of (mean CER across datasets, mean SSIM across datasets).
@@ -323,24 +324,21 @@ def run_inference_and_evaluation(
                 eou_batch_size=eval_config.eou_batch_size,
             )
 
-            metrics, filewise_metrics = evaluate_generated_audio_dir(
-                manifest_path=eval_manifest_path,
-                audio_dir=eval_audio_dir,
-                generated_audio_dir=repeat_audio_dir,
-                config=eval_config_for_dataset,
-            )
-
-            if longform_chunk_metrics:
-                chunk_result = compute_longform_chunk_metrics(
-                    repeat_audio_dir,
-                    language=language,
-                    asr_model_name=asr_model_name,
-                    asr_model_type=asr_model_type,
-                    asr_batch_size=eval_config.asr_batch_size,
-                    strip_text_annotations_for_metrics=eval_config.strip_text_annotations_for_metrics,
-                    device=eval_config.device,
+            if longform_chunked:
+                metrics, filewise_metrics = evaluate_longform_generated_audio_dir(
+                    manifest_path=eval_manifest_path,
+                    audio_dir=eval_audio_dir,
+                    generated_audio_dir=repeat_audio_dir,
+                    config=eval_config_for_dataset,
+                    with_chunk_metrics=longform_chunk_metrics,
                 )
-                metrics.update(chunk_result["summary"])
+            else:
+                metrics, filewise_metrics = evaluate_generated_audio_dir(
+                    manifest_path=eval_manifest_path,
+                    audio_dir=eval_audio_dir,
+                    generated_audio_dir=repeat_audio_dir,
+                    config=eval_config_for_dataset,
+                )
 
             metrics_all_repeats.append(metrics)
             filewise_metrics_all_repeats.extend(filewise_metrics)
@@ -403,7 +401,8 @@ def run_inference_and_evaluation(
         append_metrics_to_csv(ci_csv, full_checkpoint_name, dataset, formatted_metrics_mean_ci)
 
         # Track per-dataset means
-        ssim_values = [m['ssim_pred_context_avg'] for m in metrics_all_repeats]
+        ssim_key = 'ssim_pred_context_chunk_avg' if longform_chunked else 'ssim_pred_context_avg'
+        ssim_values = [m[ssim_key] for m in metrics_all_repeats]
         cer_values = [m['cer_cumulative'] for m in metrics_all_repeats]
         ssim_per_dataset.append(np.mean(ssim_values))
         cer_per_dataset.append(np.mean(cer_values))
@@ -545,7 +544,8 @@ def main(argv=None):
                 clean_up_disk=args.clean_up_disk,
                 skip_evaluation=not args.run_evaluation,
                 ignore_manifest_language=args.ignore_manifest_language,
-                longform_chunk_metrics=is_longform and args.longform_chunk_metrics,
+                longform_chunked=is_longform,
+                longform_chunk_metrics=args.longform_chunk_metrics,
             )
 
     else:  # nemo mode
@@ -585,7 +585,8 @@ def main(argv=None):
                 clean_up_disk=args.clean_up_disk,
                 skip_evaluation=not args.run_evaluation,
                 ignore_manifest_language=args.ignore_manifest_language,
-                longform_chunk_metrics=is_longform and args.longform_chunk_metrics,
+                longform_chunked=is_longform,
+                longform_chunk_metrics=args.longform_chunk_metrics,
             )
 
     # Check quality targets

@@ -1417,10 +1417,10 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         '--longform_chunk_metrics',
         action=argparse.BooleanOptionalAction,
         default=True,
-        help='With --run_evaluation: also score every chunk (per-chunk and pooled CER/WER with the dataset ASR '
-        'model, chunks with CER > 3%% / 10%%) and the pitch jump at each chunk join (octave-filtered pyin medians). '
-        'Writes longform_chunk_metrics.json next to longform_chunks/ and adds the longform_* summary keys to '
-        '<dataset>_metrics_<r>.json.',
+        help='longform_chunked with --run_evaluation always scores the chunk files (one ASR pass; file CER/WER from '
+        'the joined chunk transcripts). This flag also reports the per-chunk summary (pooled CER/WER, chunks with '
+        'CER > 3%% / 10%%) and the pitch jump at each chunk join (octave-filtered pyin medians), in '
+        'longform_chunk_metrics.json next to longform_chunks/ and as longform_* keys of <dataset>_metrics_<r>.json.',
     )
 
 
