@@ -16,6 +16,7 @@ Used in inference and evaluation scripts to obtain metrics such as ASR_WER and U
 """
 import argparse
 import json
+import multiprocessing
 import os
 import pprint
 import re
@@ -322,14 +323,7 @@ def load_evaluation_models(
         'emotion_model': None,
     }
 
-    if asr_model_type == "nemo":
-        models['asr_model'] = NemoTranscriber(model_name=asr_model_name, device=device)
-    elif asr_model_type == "nemo_with_prompt":
-        models['asr_model'] = NemoTranscriberWithPrompt(model_name=asr_model_name, device=device)
-    elif asr_model_type == "whisper":
-        models['asr_model'] = WhisperTranscriber(model_name=asr_model_name, device=device)
-    else:
-        raise ValueError(f"Unknown ASR model type {asr_model_name}")
+    models['asr_model'] = load_asr_transcriber(asr_model_name, asr_model_type, device)
 
     if sv_model_type == "wavlm":
         models['feature_extractor'] = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
@@ -363,6 +357,17 @@ def load_evaluation_models(
             logging.warning(f"Emotion encoder could not be loaded: {e}. ESIM/EMS metrics will be set to NaN.")
 
     return models
+
+
+def load_asr_transcriber(asr_model_name, asr_model_type="nemo", device="cuda"):
+    """Load the ASR transcriber of ``asr_model_type`` ("nemo", "nemo_with_prompt" or "whisper")."""
+    if asr_model_type == "nemo":
+        return NemoTranscriber(model_name=asr_model_name, device=device)
+    if asr_model_type == "nemo_with_prompt":
+        return NemoTranscriberWithPrompt(model_name=asr_model_name, device=device)
+    if asr_model_type == "whisper":
+        return WhisperTranscriber(model_name=asr_model_name, device=device)
+    raise ValueError(f"Unknown ASR model type {asr_model_name}")
 
 
 def compute_emotion_pair_metrics(emotion_model, gt_audio_path, pred_audio_path):
@@ -809,6 +814,137 @@ def evaluate(
     return avg_metrics, filtered_filewise
 
 
+# ---------------------------------------------------------------------------
+# Long-form chunked inference: per-chunk ASR and join pitch
+# ---------------------------------------------------------------------------
+
+LONGFORM_CHUNK_DIR = "longform_chunks"
+LONGFORM_CHUNK_METRICS_FILE = "longform_chunk_metrics.json"
+_PYIN_SR, _PYIN_HOP = 16000, 320
+_JOIN_END_SEC, _JOIN_START_SEC = 3.5, 2.5  # last 3.5 s of chunk N vs first 2.5 s of chunk N+1
+_MIN_F0_FRAMES = 10  # 0.2 s of voiced frames per median
+
+
+def longform_f0_stats(path: str) -> dict:
+    """pyin F0 medians of one chunk (16 kHz, 60-450 Hz, 1024-sample frames, hop 320).
+
+    ``f0_whole``: median F0 of the chunk's voiced frames. ``f0_start``/``f0_end``: median F0 in the first 2.5 s /
+    last 3.5 s over the voiced frames within 0.67x-1.5x of ``f0_whole`` (drops creaky octave-down frames and pyin
+    octave errors). Every median needs at least 10 frames, else it is None.
+    """
+    wav, _ = librosa.load(str(path), sr=_PYIN_SR, mono=True)
+    f0, voiced, _ = librosa.pyin(wav, fmin=60, fmax=450, sr=_PYIN_SR, frame_length=1024, hop_length=_PYIN_HOP)
+    t = np.arange(len(f0)) * _PYIN_HOP / _PYIN_SR
+    dur = len(wav) / _PYIN_SR
+    voiced = voiced & ~np.isnan(f0)
+
+    def window_median(mask, lo, hi):
+        m = mask & (t >= lo) & (t < hi)
+        return float(np.median(f0[m])) if m.sum() >= _MIN_F0_FRAMES else None
+
+    whole = float(np.median(f0[voiced])) if voiced.sum() >= _MIN_F0_FRAMES else None
+    clean = voiced & (f0 >= 0.67 * whole) & (f0 <= 1.5 * whole) if whole else voiced & False
+    return dict(
+        dur=dur,
+        f0_start=window_median(clean, 0, _JOIN_START_SEC),
+        f0_end=window_median(clean, max(0, dur - _JOIN_END_SEC), dur),
+        f0_whole=whole,
+    )
+
+
+def _join_jumps(stats: list) -> list:
+    """|semitones| between the end of chunk i and the start of chunk i+1 (None when a median is missing)."""
+    return [
+        abs(float(12 * np.log2(b["f0_start"] / a["f0_end"]))) if b["f0_start"] and a["f0_end"] else None
+        for a, b in zip(stats, stats[1:])
+    ]
+
+
+def compute_longform_chunk_metrics(
+    generated_audio_dir: str,
+    language: str = "en",
+    asr_model_name: str = "nvidia/parakeet-tdt-1.1b",
+    asr_model_type: str = "nemo",
+    asr_batch_size: int = 32,
+    strip_text_annotations_for_metrics: bool = False,
+    device: str = "cuda",
+    num_workers: int = 8,
+) -> dict:
+    """Per-chunk ASR and join pitch of a longform_chunked output directory.
+
+    Reads ``<generated_audio_dir>/longform_chunks/`` (item_<i>_chunk_<k>.wav and item_<i>.json with each chunk's
+    text), transcribes every chunk with the given ASR model and scores it with the dataset's text normalizer:
+    per-chunk CER/WER, pooled CER/WER over all chunks (edits / reference length), and the number of chunks with
+    CER above 3% and 10%. Join pitch jump: |semitones| between the median F0 of the last 3.5 s of a chunk and the
+    first 2.5 s of the next chunk of the same item, over the voiced frames within 0.67x-1.5x of each chunk's median
+    (longform_f0_stats); mean, median and % of joins where both medians exist.
+
+    Writes ``<generated_audio_dir>/longform_chunk_metrics.json`` (summary, chunks, joins) and returns it.
+    """
+    chunk_dir = os.path.join(generated_audio_dir, LONGFORM_CHUNK_DIR)
+    item_ids = sorted(int(f[5:-5]) for f in os.listdir(chunk_dir) if re.fullmatch(r"item_\d+\.json", f))
+    chunks = []
+    for item in item_ids:
+        with open(os.path.join(chunk_dir, f"item_{item}.json"), encoding="utf-8") as f:
+            info = json.load(f)
+        for k, chunk in enumerate(info["chunks"]):
+            path = os.path.join(chunk_dir, f"item_{item}_chunk_{k:03d}.wav")
+            chunks.append(dict(item=item, chunk=k, file=os.path.basename(path), path=path, text=chunk["text"]))
+    if not chunks:
+        raise ValueError(f"No long-form chunks found in {chunk_dir}")
+    paths = [c["path"] for c in chunks]
+
+    # Pitch on CPU workers (spawned when CUDA is already initialized in this process).
+    start_time = time.time()
+    context = "spawn" if torch.cuda.is_initialized() else "fork"
+    with multiprocessing.get_context(context).Pool(max(1, num_workers)) as pool:
+        f0 = pool.map(longform_f0_stats, paths, chunksize=1)
+    logging.info(f"Long-form join pitch for {len(paths)} chunks in {time.time() - start_time:.0f}s")
+
+    asr_model = load_asr_transcriber(asr_model_name, asr_model_type, device)
+    hyps = asr_model.transcribe(audio_paths=paths, language=language, batch_size=asr_batch_size)
+    del asr_model
+    text_processor = get_text_processor(language)
+    clean = strip_text_annotations_from_text if strip_text_annotations_for_metrics else (lambda x: x)
+    refs = [text_processor.process_text_for_wer(clean(c["text"])) for c in chunks]
+    hyps = [text_processor.process_text_for_wer(clean(h)) for h in hyps]
+
+    for c, ref, hyp, stats in zip(chunks, refs, hyps, f0):
+        del c["path"]
+        c.update(
+            reference=ref,
+            transcript=hyp,
+            ref_chars=len(ref),
+            cer=word_error_rate_detail(hypotheses=[hyp], references=[ref], use_cer=True)[0],
+            wer=word_error_rate_detail(hypotheses=[hyp], references=[ref], use_cer=False)[0],
+            **stats,
+        )
+    joins = []
+    for item in item_ids:
+        jumps = _join_jumps([c for c in chunks if c["item"] == item])
+        joins += [dict(item=item, chunk=k, jump_semitones=j) for k, j in enumerate(jumps)]
+    kept = [j["jump_semitones"] for j in joins if j["jump_semitones"] is not None]
+
+    cers = [c["cer"] for c in chunks]
+    summary = {
+        "longform_chunks": len(chunks),
+        "longform_chunk_cer_pooled": word_error_rate_detail(hypotheses=hyps, references=refs, use_cer=True)[0],
+        "longform_chunk_wer_pooled": word_error_rate_detail(hypotheses=hyps, references=refs, use_cer=False)[0],
+        "longform_chunk_cer_avg": float(np.mean(cers)),
+        "longform_chunks_cer_gt_3pct": int(sum(c > 0.03 for c in cers)),
+        "longform_chunks_cer_gt_10pct": int(sum(c > 0.10 for c in cers)),
+        "longform_joins": len(joins),
+        "longform_join_jump_mean": float(np.mean(kept)) if kept else float('nan'),
+        "longform_join_jump_median": float(np.median(kept)) if kept else float('nan'),
+        "longform_join_jump_kept_pct": 100.0 * len(kept) / len(joins) if joins else float('nan'),
+    }
+    result = dict(summary=summary, chunks=chunks, joins=joins)
+    with open(os.path.join(generated_audio_dir, LONGFORM_CHUNK_METRICS_FILE), "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=1, ensure_ascii=False)
+    logging.info(f"Long-form chunk metrics: {summary}")
+    return result
+
+
 def compute_fcd(gt_audio_paths, predicted_codes_paths, codec_model_path, device="cuda"):
     """Compute Frechet Codec Distance from ground-truth audio paths and predicted codec codes paths.
 
@@ -973,7 +1109,40 @@ def main():
         action='store_true',
         help='Strip bracket/tag/control annotations from reference and ASR hypothesis text while computing text metrics.',
     )
+    parser.add_argument(
+        '--longform_chunk_metrics_only',
+        action='store_true',
+        help='Only (re)compute per-chunk ASR and join pitch of a longform_chunked output: --generated_audio_dir is '
+        'the directory holding longform_chunks/ (audio/repeat_<r>); writes longform_chunk_metrics.json there.',
+    )
+    parser.add_argument('--asr_model_name', type=str, default="nvidia/parakeet-tdt-1.1b")
+    parser.add_argument('--asr_model_type', type=str, default="nemo", choices=["nemo", "nemo_with_prompt", "whisper"])
+    parser.add_argument('--asr_batch_size', type=int, default=32)
+    parser.add_argument(
+        '--update_metrics_json',
+        type=str,
+        default=None,
+        help='With --longform_chunk_metrics_only: also add the summary to this <dataset>_metrics_<r>.json.',
+    )
     args = parser.parse_args()
+
+    if args.longform_chunk_metrics_only:
+        result = compute_longform_chunk_metrics(
+            args.generated_audio_dir,
+            language=args.language,
+            asr_model_name=args.asr_model_name,
+            asr_model_type=args.asr_model_type,
+            asr_batch_size=args.asr_batch_size,
+            strip_text_annotations_for_metrics=args.strip_text_annotations_for_metrics,
+        )
+        if args.update_metrics_json:
+            with open(args.update_metrics_json) as f:
+                metrics = json.load(f)
+            metrics.update(result["summary"])
+            with open(args.update_metrics_json, "w") as f:
+                json.dump(metrics, f, indent=4)
+        pprint.pprint(result["summary"])
+        return
 
     if args.evalset is not None:
         dataset_meta_info = load_evalset_config()

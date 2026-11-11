@@ -1413,6 +1413,15 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
     longform.add_argument(
         '--longform_espeak_voice', type=str, default='en-us', help='espeak-ng voice for --longform_force_espeak_ipa.'
     )
+    longform.add_argument(
+        '--longform_chunk_metrics',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='With --run_evaluation: also score every chunk (per-chunk and pooled CER/WER with the dataset ASR '
+        'model, chunks with CER > 3%% / 10%%) and the pitch jump at each chunk join (octave-filtered pyin medians). '
+        'Writes longform_chunk_metrics.json next to longform_chunks/ and adds the longform_* summary keys to '
+        '<dataset>_metrics_<r>.json.',
+    )
 
 
 def _build_inference_params_from_args(param_cls: type, args):
