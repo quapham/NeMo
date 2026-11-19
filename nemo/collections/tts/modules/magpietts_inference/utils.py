@@ -1414,6 +1414,13 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         '--longform_espeak_voice', type=str, default='en-us', help='espeak-ng voice for --longform_force_espeak_ipa.'
     )
     longform.add_argument(
+        '--longform_codec_warm',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Decode each chunk after the codec silence frames of the model\'s speech-delay warm-up and cut them '
+        'off, so the codec does not start cold (removes start-of-chunk bursts).',
+    )
+    longform.add_argument(
         '--longform_chunk_metrics',
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1484,6 +1491,7 @@ def _build_easy_magpie_config(args) -> EasyMagpieInferenceConfig:
             force_espeak_ipa=args.longform_force_espeak_ipa,
             espeak_voice=args.longform_espeak_voice,
             eos_detection_method=args.eos_detection_method,
+            codec_warm=args.longform_codec_warm,
         )
     return cfg_cls(**kwargs)
 

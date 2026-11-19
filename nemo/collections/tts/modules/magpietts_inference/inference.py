@@ -2266,6 +2266,18 @@ def espeak_ipa(text: str, voice: str = "en-us") -> str:
     return ' '.join(result.stdout.split())
 
 
+def decode_with_codec_history(codec_helper, history: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
+    """Decode ``codes`` (C, T) after ``history`` (C, K) and return only the samples of ``codes`` (1-D, CPU float),
+    so the causal codec decoder starts with history instead of cold."""
+    k = history.size(-1)
+    joined = torch.cat([history.to(codes.device, codes.dtype), codes], dim=-1)[None]
+    audio, audio_len, _ = codec_helper.codes_to_audio(
+        joined, torch.tensor([joined.size(-1)], dtype=torch.long, device=joined.device)
+    )
+    audio = audio[0, : int(audio_len[0])].float().cpu()
+    return audio[k * (audio.numel() // joined.size(-1)) :]
+
+
 @dataclass
 class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
     """Configuration for chunked long-form EasyMagpie inference (see EasyMagpieLongformInferenceRunner).
@@ -2283,6 +2295,10 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
             (a chunk with empty espeak-ng output uses predicted phonemes).
         espeak_voice: espeak-ng voice used with force_espeak_ipa.
         eos_detection_method: None (stop on EOS in any codebook) or 'multinomial_zero_cb'.
+        codec_warm: Decode each chunk after the codec silence frames the model writes during its
+            streaming_speech_delay warm-up (delay x frame_stacking_factor frames, ~0.4 s) and cut them off, so the
+            causal codec decoder does not start cold (a cold start can turn the silent opening of a chunk into a
+            short burst). Changes decoding only: same tokens, same audio length.
     """
 
     chunk_min_words: int = 40
@@ -2294,6 +2310,7 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
     force_espeak_ipa: bool = False
     espeak_voice: str = "en-us"
     eos_detection_method: Optional[str] = None
+    codec_warm: bool = True
 
     def __post_init__(self):
         if self.carry not in LONGFORM_CARRY_MODES:
@@ -2432,6 +2449,14 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
             x = x[:, :-1][:, -self.config.tail_steps :]
         return x
 
+    def _codec_warm_history(self, codes: torch.Tensor) -> Optional[torch.Tensor]:
+        """Silence codec frames (C, K) to decode in front of this chunk's ``codes`` (C, T), or None to decode it alone."""
+        frames = int(self.model.training_modes[0].streaming_speech_delay) * int(self.model.frame_stacking_factor)
+        if not self.config.codec_warm or codes.size(-1) == 0 or frames == 0:
+            return None
+        silence = self._ensure_codec_silence_codes().to(codes.device, codes.dtype)
+        return silence.view(-1, 1).expand(codes.size(0), frames)
+
     def _generate_chunk(self, dataset: EasyMagpieMultiturnUserAudioDataset, record: dict, text: str):
         """Generate one chunk and set the carry for the next one.
 
@@ -2465,6 +2490,11 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
             self._chunk_inputs, self._chunk_state = [], None
 
         wave = output.audio[0, : int(output.audio_len[0])].float().cpu()
+        decode_codes = output.audio_codes[0, :, : int(output.audio_codes_len[0])]
+        history = self._codec_warm_history(decode_codes)
+        if history is not None:
+            with torch.inference_mode():
+                wave = decode_with_codec_history(model._codec_helper, history, decode_codes)
         _, start_frame, end_frame = turn_frame_ranges[0]
         codes = None if generated_codes is None else generated_codes[0, :, start_frame:end_frame].detach().cpu()
         sample_rate = getattr(model, "output_sample_rate", model.sample_rate)
