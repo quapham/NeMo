@@ -121,7 +121,6 @@ def evaluate_longform_generated_audio_dir(
     audio_dir: str,
     generated_audio_dir: str,
     config: EvaluationConfig,
-    with_chunk_metrics: bool = True,
 ) -> Tuple[Dict[str, float], List[dict]]:
     """evaluate_generated_audio_dir() for longform_chunked outputs (see evaluate_generated_audio.evaluate_longform).
 
@@ -142,7 +141,6 @@ def evaluate_longform_generated_audio_dir(
         eou_batch_size=config.eou_batch_size,
         device=config.device,
         eou_model_name=config.eou_model_name,
-        with_chunk_metrics=with_chunk_metrics,
     )
 
 

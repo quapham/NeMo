@@ -2203,7 +2203,8 @@ _NON_FINAL_ABBREVIATIONS = {
     'sen', 'rep', 'vs', 'etc', 'no',
 }  # fmt: skip
 
-LONGFORM_CARRY_MODES = ("full_audio_only", "tail", "none")
+LONGFORM_CARRY_MODES = ("full_audio_only", "none")
+LONGFORM_USER_SILENCE_STEPS = 5  # silent user turn before each chunk, in decoder steps
 
 
 def split_sentences(text: str) -> List[str]:
@@ -2285,10 +2286,7 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
     Attributes:
         chunk_min_words: Minimum words per chunk (whole sentences per chunk).
         chunk_max_words: Maximum words per chunk.
-        carry: How the previous chunk conditions the next one: 'full_audio_only', 'tail' or 'none'.
-        tail_steps: Number of carried positions for carry='tail'.
-        user_silence_steps: Length of the silent user turn before each chunk, in decoder steps; None uses
-            5 (4 for carry='tail').
+        carry: How the previous chunk conditions the next one: 'full_audio_only' or 'none'.
         reference_bias: Additive attention bias on the context-audio (reference) keys at every single-position
             backbone forward of a chunk; 0 disables it.
         force_espeak_ipa: Feed the espeak-ng IPA of each chunk as its phoneme stream instead of predicting it
@@ -2304,8 +2302,6 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
     chunk_min_words: int = 40
     chunk_max_words: int = 60
     carry: str = "full_audio_only"
-    tail_steps: int = 100
-    user_silence_steps: Optional[int] = None
     reference_bias: float = 0.0
     force_espeak_ipa: bool = False
     espeak_voice: str = "en-us"
@@ -2322,16 +2318,13 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
                 f"longform_chunked supports eos_detection_method None or 'multinomial_zero_cb', "
                 f"got {self.eos_detection_method!r}"
             )
-        if self.user_silence_steps is None:
-            self.user_silence_steps = 4 if self.carry == "tail" else 5
 
     def build_identifier(self) -> str:
-        carry = f"tail{self.tail_steps}" if self.carry == "tail" else self.carry
         return "_".join(
             [
                 super().build_identifier(),
                 f"Longform_W{self.chunk_min_words}-{self.chunk_max_words}",
-                f"Carry_{carry}",
+                f"Carry_{self.carry}",
                 f"RefBias{self.reference_bias}",
                 f"IPA_{'espeak' if self.force_espeak_ipa else 'pred'}",
                 f"EOS_{self.eos_detection_method or 'any'}",
@@ -2352,7 +2345,6 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
         full_audio_only: the previous chunk's own backbone inputs (silent user turn, warmup and generation
             steps) with their text- and phoneme-channel inputs subtracted (only the conditional CFG row carries
             them), i.e. its audio and user-turn channels, prefilled after the reference.
-        tail: the same audio-only inputs without the last position, last ``tail_steps`` positions only.
         none: chunks are generated independently.
     After a carry the first audio step continues from the carried audio (no audio BOS).
     """
@@ -2389,7 +2381,7 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
 
     @staticmethod
     def _left_pad_raw_audio_if_short(user_audio, user_audio_lens, min_len):
-        """The silent user turn length is set by user_silence_steps; never pad it."""
+        """The silent user turn length is LONGFORM_USER_SILENCE_STEPS; never pad it."""
         return user_audio, user_audio_lens
 
     def _streaming_init(self, **kwargs):
@@ -2433,7 +2425,7 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
         self._chunk_inputs.append(kwargs["inputs_embeds"].detach().clone())
 
     def _next_carry(self, state) -> Optional[torch.Tensor]:
-        """Audio-only inputs of the chunk just generated, cut to the carry mode."""
+        """Audio-only inputs of the chunk just generated (None with carry 'none')."""
         if self.config.carry == "none":
             return None
         x = torch.cat(self._chunk_inputs, dim=1).clone()
@@ -2445,8 +2437,6 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
             if phoneme_input is not None:
                 phoneme[position - self._chunk_start_position] += phoneme_input[0]
         x[0] -= (text + phoneme).to(x.dtype)  # row 0 = conditional row of batch item 0
-        if self.config.carry == "tail":
-            x = x[:, :-1][:, -self.config.tail_steps :]
         return x
 
     def _codec_warm_history(self, codes: torch.Tensor) -> Optional[torch.Tensor]:
@@ -2466,7 +2456,7 @@ class EasyMagpieLongformInferenceRunner(EasyMagpieMultiturnUserAudioInferenceRun
         model = self.model
         batch = dataset.collate_fn([dict(record, text=[text])])
         silence = torch.zeros(
-            1, self.config.user_silence_steps * int(model.codec_model_samples_per_frame * model.frame_stacking_factor)
+            1, LONGFORM_USER_SILENCE_STEPS * int(model.codec_model_samples_per_frame * model.frame_stacking_factor)
         )
         batch["user_audio_turns"] = [silence]
         batch["user_audio_turns_lens"] = [torch.tensor([silence.size(1)], dtype=torch.long)]

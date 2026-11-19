@@ -877,7 +877,6 @@ def compute_longform_chunk_metrics(
     strip_text_annotations_for_metrics: bool = False,
     device: str = "cuda",
     num_workers: int = 8,
-    with_join_pitch: bool = True,
     output_dir: Optional[str] = None,
 ) -> dict:
     """Per-chunk ASR and join pitch of a longform_chunked output directory.
@@ -891,7 +890,6 @@ def compute_longform_chunk_metrics(
 
     Writes ``longform_chunk_metrics.json`` (summary, chunks, joins) to ``output_dir`` (default:
     ``generated_audio_dir``) and returns it. Each chunk row keeps the raw ASR output as ``asr_text``.
-    ``with_join_pitch=False`` skips the pitch part (no join keys).
     """
     chunk_dir = os.path.join(generated_audio_dir, LONGFORM_CHUNK_DIR)
     item_ids = sorted(int(f[5:-5]) for f in os.listdir(chunk_dir) if re.fullmatch(r"item_\d+\.json", f))
@@ -906,13 +904,12 @@ def compute_longform_chunk_metrics(
         raise ValueError(f"No long-form chunks found in {chunk_dir}")
     paths = [c["path"] for c in chunks]
 
-    f0 = [{} for _ in paths]
-    if with_join_pitch:  # pitch on CPU workers (spawned when CUDA is already initialized in this process)
-        start_time = time.time()
-        context = "spawn" if torch.cuda.is_initialized() else "fork"
-        with multiprocessing.get_context(context).Pool(max(1, num_workers)) as pool:
-            f0 = pool.map(longform_f0_stats, paths, chunksize=1)
-        logging.info(f"Long-form join pitch for {len(paths)} chunks in {time.time() - start_time:.0f}s")
+    # pitch on CPU workers (spawned when CUDA is already initialized in this process)
+    start_time = time.time()
+    context = "spawn" if torch.cuda.is_initialized() else "fork"
+    with multiprocessing.get_context(context).Pool(max(1, num_workers)) as pool:
+        f0 = pool.map(longform_f0_stats, paths, chunksize=1)
+    logging.info(f"Long-form join pitch for {len(paths)} chunks in {time.time() - start_time:.0f}s")
 
     asr_model = load_asr_transcriber(asr_model_name, asr_model_type, device)
     asr_texts = asr_model.transcribe(audio_paths=paths, language=language, batch_size=asr_batch_size)
@@ -934,7 +931,7 @@ def compute_longform_chunk_metrics(
             **stats,
         )
     joins = []
-    for item in item_ids if with_join_pitch else []:
+    for item in item_ids:
         jumps = _join_jumps([c for c in chunks if c["item"] == item])
         joins += [dict(item=item, chunk=k, jump_semitones=j) for k, j in enumerate(jumps)]
     kept = [j["jump_semitones"] for j in joins if j["jump_semitones"] is not None]
@@ -948,13 +945,12 @@ def compute_longform_chunk_metrics(
         "longform_chunks_cer_gt_3pct": int(sum(c > 0.03 for c in cers)),
         "longform_chunks_cer_gt_10pct": int(sum(c > 0.10 for c in cers)),
     }
-    if with_join_pitch:
-        summary.update(
-            longform_joins=len(joins),
-            longform_join_jump_mean=float(np.mean(kept)) if kept else float('nan'),
-            longform_join_jump_median=float(np.median(kept)) if kept else float('nan'),
-            longform_join_jump_kept_pct=100.0 * len(kept) / len(joins) if joins else float('nan'),
-        )
+    summary.update(
+        longform_joins=len(joins),
+        longform_join_jump_mean=float(np.mean(kept)) if kept else float('nan'),
+        longform_join_jump_median=float(np.median(kept)) if kept else float('nan'),
+        longform_join_jump_kept_pct=100.0 * len(kept) / len(joins) if joins else float('nan'),
+    )
     result = dict(summary=summary, chunks=chunks, joins=joins)
     output_dir = output_dir or generated_audio_dir
     os.makedirs(output_dir, exist_ok=True)
@@ -978,7 +974,6 @@ def evaluate_longform(
     eou_batch_size=32,
     device="cuda",
     eou_model_name=None,
-    with_chunk_metrics=True,
     output_dir=None,
 ):
     """evaluate() for longform_chunked outputs, without loading any whole long file into an ASR, SV or EoU model.
@@ -996,7 +991,7 @@ def evaluate_longform(
     - utmosv2_avg: whole file as before (UTMOSv2 scores a fixed-length crop, so long files are memory-safe).
     - EoU rates: classification of the file's last chunk against that chunk's text (the end of the file).
     - FCD and prosody metrics: not computed.
-    With ``with_chunk_metrics`` the longform_* chunk summary (per-chunk ASR, join pitch) is added as well.
+    The longform_* chunk summary (per-chunk ASR, join pitch) is added as well.
     The chunk metrics JSON goes to ``output_dir`` (default: ``generated_audio_dir``).
 
     Returns:
@@ -1011,7 +1006,6 @@ def evaluate_longform(
         asr_batch_size=asr_batch_size,
         strip_text_annotations_for_metrics=strip_text_annotations_for_metrics,
         device=device,
-        with_join_pitch=with_chunk_metrics,
         output_dir=output_dir,
     )
     audio_file_lists = find_generated_audio_files(generated_audio_dir)
@@ -1106,8 +1100,7 @@ def evaluate_longform(
     avg_metrics['ssim_pred_context_chunk_avg_alternate'] = (
         sum(r['pred_context_ssim_chunks_alternate'] for r in rows) / n
     )
-    if with_chunk_metrics:
-        avg_metrics.update(chunk_result["summary"])
+    avg_metrics.update(chunk_result["summary"])
     logging.info(f"evaluate_longform() completed in {time.time() - start_time:.1f}s")
     filewise_metrics_to_save = list(FILEWISE_METRICS_TO_SAVE) + LONGFORM_FILEWISE_METRICS_TO_SAVE
     return avg_metrics, [{k: m[k] for k in filewise_metrics_to_save if k in m} for m in rows]
@@ -1277,12 +1270,6 @@ def main():
         action='store_true',
         help='Strip bracket/tag/control annotations from reference and ASR hypothesis text while computing text metrics.',
     )
-    parser.add_argument(
-        '--longform_chunk_metrics_only',
-        action='store_true',
-        help='Only (re)compute per-chunk ASR and join pitch of a longform_chunked output: --generated_audio_dir is '
-        'the directory holding longform_chunks/ (audio/repeat_<r>); writes longform_chunk_metrics.json there.',
-    )
     parser.add_argument('--asr_model_name', type=str, default="nvidia/parakeet-tdt-1.1b")
     parser.add_argument('--asr_model_type', type=str, default="nemo", choices=["nemo", "nemo_with_prompt", "whisper"])
     parser.add_argument('--asr_batch_size', type=int, default=32)
@@ -1294,14 +1281,8 @@ def main():
         'to its longform_manifest.jsonl and itself. Writes metrics.json, filewise_metrics.json and '
         'longform_chunk_metrics.json to --output_dir.',
     )
-    parser.add_argument('--output_dir', type=str, default=None, help='Where --longform_* modes write their JSON.')
+    parser.add_argument('--output_dir', type=str, default=None, help='Where --longform_rescore writes its JSON.')
     parser.add_argument('--eou_batch_size', type=int, default=32, help='EoU batch size for --longform_rescore.')
-    parser.add_argument(
-        '--update_metrics_json',
-        type=str,
-        default=None,
-        help='With --longform_chunk_metrics_only: also add the summary to this <dataset>_metrics_<r>.json.',
-    )
     args = parser.parse_args()
 
     if args.longform_rescore:
@@ -1322,25 +1303,6 @@ def main():
             json.dump(metrics, f, indent=4)
         with open(os.path.join(output_dir, "filewise_metrics.json"), "w", encoding="utf-8") as f:
             json.dump(filewise, f, indent=4, ensure_ascii=False)
-        return
-
-    if args.longform_chunk_metrics_only:
-        result = compute_longform_chunk_metrics(
-            args.generated_audio_dir,
-            language=args.language,
-            asr_model_name=args.asr_model_name,
-            asr_model_type=args.asr_model_type,
-            asr_batch_size=args.asr_batch_size,
-            strip_text_annotations_for_metrics=args.strip_text_annotations_for_metrics,
-            output_dir=args.output_dir,
-        )
-        if args.update_metrics_json:
-            with open(args.update_metrics_json) as f:
-                metrics = json.load(f)
-            metrics.update(result["summary"])
-            with open(args.update_metrics_json, "w") as f:
-                json.dump(metrics, f, indent=4)
-        pprint.pprint(result["summary"])
         return
 
     if args.evalset is not None:

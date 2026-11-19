@@ -59,14 +59,14 @@ class TestLongformConfig:
         config = EasyMagpieLongformInferenceConfig(batch_size=1)
         assert (config.chunk_min_words, config.chunk_max_words, config.carry) == (40, 60, "full_audio_only")
         assert config.reference_bias == 0.0 and not config.force_espeak_ipa and config.eos_detection_method is None
-        assert config.user_silence_steps == 5 and config.codec_warm
-        assert EasyMagpieLongformInferenceConfig(batch_size=1, carry="tail").user_silence_steps == 4
+        assert config.codec_warm
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "kwargs",
         [
             dict(carry="previous"),
+            dict(carry="tail"),
             dict(eos_detection_method="argmax_any"),
             dict(chunk_min_words=0),
         ],

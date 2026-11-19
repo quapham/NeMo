@@ -1385,17 +1385,9 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         '--longform_carry',
         type=str,
         default='full_audio_only',
-        choices=['full_audio_only', 'tail', 'none'],
+        choices=['full_audio_only', 'none'],
         help='How the previous chunk conditions the next one: full_audio_only = the whole previous chunk is '
-        'prefilled after the reference without its text/phoneme channels; tail = only its last '
-        '--longform_tail_steps positions of that; none = independent chunks.',
-    )
-    longform.add_argument('--longform_tail_steps', type=int, default=100, help='Carried positions for tail.')
-    longform.add_argument(
-        '--longform_user_silence_steps',
-        type=int,
-        default=None,
-        help='Silent user turn before each chunk, in decoder steps (default 5, or 4 with --longform_carry tail).',
+        'prefilled after the reference without its text/phoneme channels; none = independent chunks.',
     )
     longform.add_argument(
         '--longform_reference_bias',
@@ -1419,15 +1411,6 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
         default=True,
         help='Decode each chunk after the codec silence frames of the model\'s speech-delay warm-up and cut them '
         'off, so the codec does not start cold (removes start-of-chunk bursts).',
-    )
-    longform.add_argument(
-        '--longform_chunk_metrics',
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help='longform_chunked with --run_evaluation always scores the chunk files (one ASR pass; file CER/WER from '
-        'the joined chunk transcripts). This flag also reports the per-chunk summary (pooled CER/WER, chunks with '
-        'CER > 3%% / 10%%) and the pitch jump at each chunk join (octave-filtered pyin medians), in '
-        'longform_chunk_metrics.json next to longform_chunks/ and as longform_* keys of <dataset>_metrics_<r>.json.',
     )
 
 
@@ -1485,8 +1468,6 @@ def _build_easy_magpie_config(args) -> EasyMagpieInferenceConfig:
             chunk_min_words=chunk_min_words,
             chunk_max_words=chunk_max_words,
             carry=args.longform_carry,
-            tail_steps=args.longform_tail_steps,
-            user_silence_steps=args.longform_user_silence_steps,
             reference_bias=args.longform_reference_bias,
             force_espeak_ipa=args.longform_force_espeak_ipa,
             espeak_voice=args.longform_espeak_voice,

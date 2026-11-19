@@ -118,7 +118,6 @@ def run_inference_and_evaluation(
     skip_evaluation: bool = False,
     ignore_manifest_language: bool = False,
     longform_chunked: bool = False,
-    longform_chunk_metrics: bool = True,
 ) -> Tuple[Optional[float], Optional[float]]:
     """Run inference and optional evaluation on specified datasets.
 
@@ -142,8 +141,7 @@ def run_inference_and_evaluation(
         skip_evaluation: Whether to skip evaluation (inference only mode).
         ignore_manifest_language: Whether dataset-level language should override manifest records.
         longform_chunked: Whether the runner is longform_chunked: evaluation then scores the chunk files instead of
-            whole long files (evaluate_longform_generated_audio_dir).
-        longform_chunk_metrics: With longform_chunked, also report the per-chunk ASR and join pitch summary.
+            whole long files (evaluate_longform_generated_audio_dir), plus per-chunk ASR and join pitch.
 
     Returns:
         Tuple of (mean CER across datasets, mean SSIM across datasets).
@@ -330,7 +328,6 @@ def run_inference_and_evaluation(
                     audio_dir=eval_audio_dir,
                     generated_audio_dir=repeat_audio_dir,
                     config=eval_config_for_dataset,
-                    with_chunk_metrics=longform_chunk_metrics,
                 )
             else:
                 metrics, filewise_metrics = evaluate_generated_audio_dir(
@@ -545,7 +542,6 @@ def main(argv=None):
                 skip_evaluation=not args.run_evaluation,
                 ignore_manifest_language=args.ignore_manifest_language,
                 longform_chunked=is_longform,
-                longform_chunk_metrics=args.longform_chunk_metrics,
             )
 
     else:  # nemo mode
@@ -586,7 +582,6 @@ def main(argv=None):
                 skip_evaluation=not args.run_evaluation,
                 ignore_manifest_language=args.ignore_manifest_language,
                 longform_chunked=is_longform,
-                longform_chunk_metrics=args.longform_chunk_metrics,
             )
 
     # Check quality targets
