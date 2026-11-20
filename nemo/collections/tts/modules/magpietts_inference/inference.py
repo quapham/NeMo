@@ -46,7 +46,7 @@ from nemo.collections.common.tokenizers.text_to_speech.tts_tokenizers import Agg
 from nemo.collections.tts.data.text_to_speech_dataset import ChunkedTTSInferenceDataset, MagpieTTSDataset
 from nemo.collections.tts.models.easy_magpietts_inference import EasyModelInferenceParameters
 from nemo.collections.tts.models.magpietts import ModelInferenceParameters
-from nemo.collections.tts.modules.magpietts_modules import EOSDetectionMethod
+from nemo.collections.tts.modules.magpietts_modules import STREAMING_EOS_DETECTION_METHODS
 from nemo.collections.tts.parts.utils.tts_dataset_utils import normalize_volume, stack_tensors
 from nemo.utils import logging
 
@@ -2292,7 +2292,8 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
         force_espeak_ipa: Feed the espeak-ng IPA of each chunk as its phoneme stream instead of predicting it
             (a chunk with empty espeak-ng output uses predicted phonemes).
         espeak_voice: espeak-ng voice used with force_espeak_ipa.
-        eos_detection_method: None (stop on EOS in any codebook) or 'multinomial_zero_cb'.
+        eos_detection_method: None (stop on EOS in any codebook), 'multinomial_zero_cb' (codebook 0 decides) or
+            'multinomial_majority' (more than half of the sampled codes of a frame decide).
         codec_warm: Decode each chunk after the codec silence frames the model writes during its
             streaming_speech_delay warm-up (delay x frame_stacking_factor frames, ~0.4 s) and cut them off, so the
             causal codec decoder does not start cold (a cold start can turn the silent opening of a chunk into a
@@ -2313,9 +2314,9 @@ class EasyMagpieLongformInferenceConfig(EasyMagpieInferenceConfig):
             raise ValueError(f"carry must be one of {LONGFORM_CARRY_MODES}, got {self.carry!r}")
         if not 0 < self.chunk_min_words <= self.chunk_max_words:
             raise ValueError(f"Invalid chunk word range {self.chunk_min_words},{self.chunk_max_words}")
-        if self.eos_detection_method not in (None, EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value):
+        if self.eos_detection_method not in STREAMING_EOS_DETECTION_METHODS:
             raise ValueError(
-                f"longform_chunked supports eos_detection_method None or 'multinomial_zero_cb', "
+                f"longform_chunked supports eos_detection_method {STREAMING_EOS_DETECTION_METHODS}, "
                 f"got {self.eos_detection_method!r}"
             )
 

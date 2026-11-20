@@ -56,10 +56,17 @@ class EOSDetectionMethod(PrettyStrEnum):
     # EOS only from the *sampled* code of codebook 0. With the EasyMagpie local transformer the rest of the stacked
     # frame follows it: EOS is forced in every later codebook when index 0 sampled EOS, and masked otherwise.
     MULTINOMIAL_ZERO_CB = "multinomial_zero_cb"
+    # EOS only when more than half of the *sampled* codes of the stacked frame are EOS (EasyMagpie local transformer);
+    # a frame with fewer EOS votes is resampled without EOS, so every frame is all EOS or EOS-free.
+    MULTINOMIAL_MAJORITY = "multinomial_majority"
 
     @staticmethod
     def detection_type(detection_method: EOSDetectionMethod):
-        if detection_method in [EOSDetectionMethod.ARGMAX_ANY, EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ANY]:
+        if detection_method in [
+            EOSDetectionMethod.ARGMAX_ANY,
+            EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ANY,
+            EOSDetectionMethod.MULTINOMIAL_MAJORITY,  # frames are all EOS or EOS-free
+        ]:
             return "any"
         elif detection_method in [EOSDetectionMethod.ARGMAX_ALL, EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ALL]:
             return "all"
@@ -86,10 +93,18 @@ class EOSDetectionMethod(PrettyStrEnum):
             EOSDetectionMethod.ARGMAX_OR_MULTINOMIAL_ZERO_CB,
         ]:
             return "argmax_or_multinomial"
-        elif detection_method == EOSDetectionMethod.MULTINOMIAL_ZERO_CB:
+        elif detection_method in [EOSDetectionMethod.MULTINOMIAL_ZERO_CB, EOSDetectionMethod.MULTINOMIAL_MAJORITY]:
             return "multinomial"
         else:
             raise ValueError(f"Invalid EOS detection method: {detection_method}")
+
+
+# EOS rules of EasyMagpie streaming inference (None = stop on EOS in any codebook).
+STREAMING_EOS_DETECTION_METHODS = (
+    None,
+    EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value,
+    EOSDetectionMethod.MULTINOMIAL_MAJORITY.value,
+)
 
 
 class SpecialAudioToken(Enum):
@@ -567,6 +582,7 @@ class LocalTransformerHelper:
         forbid_audio_eos: bool = False,
         sanitize_logits: bool = False,
         zero_cb_eos: bool = False,
+        majority_eos: bool = False,
     ) -> torch.Tensor:
         """Sample audio codes autoregressively across codebooks using the local transformer.
 
@@ -585,9 +601,55 @@ class LocalTransformerHelper:
                 sample EOS); if it sampled EOS, every later index of the frame is forced to EOS, otherwise EOS is
                 masked at every later index. A frame is then either all EOS or EOS-free, so stopping on EOS in any
                 codebook is the same as stopping on the sampled codebook-0 code.
+            majority_eos: EOS rule ``multinomial_majority``. The frame is first sampled as usual (EOS may be sampled
+                at any index and is fed to the later indices); the indices that sampled EOS are votes. More than half
+                of the indices voting EOS ends the item: every index of its frame is set to EOS. Fewer (but some)
+                votes: the frame is sampled again with EOS masked at every index, so it is normal audio. No votes:
+                the first pass is kept. A frame is then either all EOS or EOS-free.
 
         Returns:
             Sampled audio codes (B, num_codebooks, frame_stacking_factor).
+        """
+        if zero_cb_eos and majority_eos:
+            raise ValueError("zero_cb_eos and majority_eos are exclusive EOS rules")
+        args = (dec_output, temperature, topk, unfinished_items, finished_items, use_cfg, cfg_scale, use_kv_cache)
+        kwargs = dict(forbid_audio_eos=forbid_audio_eos, sanitize_logits=sanitize_logits, zero_cb_eos=zero_cb_eos)
+        all_preds = self._sample_autoregressive_pass(*args, **kwargs)  # (B or 2B with CFG, num_codebooks * S)
+        if majority_eos:
+            is_eos = all_preds == self.audio_eos_id
+            votes = is_eos.sum(dim=1)
+            end = votes > all_preds.size(1) // 2
+            redo = (votes > 0) & ~end
+            for item_idx in finished_items:  # EOS is forced there; a pass without EOS has nothing to sample
+                redo[item_idx :: all_preds.size(0) // 2 if use_cfg else all_preds.size(0)] = False
+            if redo.any():
+                all_preds[redo] = self._sample_autoregressive_pass(*args, **kwargs, mask_eos=True)[redo]
+            all_preds[end] = self.audio_eos_id
+        all_preds = all_preds.reshape(-1, self.frame_stacking_factor, self.num_audio_codebooks).permute(0, 2, 1)
+        if use_cfg:
+            all_preds = all_preds[: all_preds.size(0) // 2]
+
+        return all_preds
+
+    def _sample_autoregressive_pass(
+        self,
+        dec_output: torch.Tensor,
+        temperature: float,
+        topk: int,
+        unfinished_items: Dict[int, bool],
+        finished_items: Dict[int, bool],
+        use_cfg: bool,
+        cfg_scale: float,
+        use_kv_cache: bool,
+        forbid_audio_eos: bool = False,
+        sanitize_logits: bool = False,
+        zero_cb_eos: bool = False,
+        mask_eos: bool = False,
+    ) -> torch.Tensor:
+        """One local-transformer pass over every codebook index of a frame (see sample_autoregressive).
+
+        ``mask_eos`` removes EOS at every index. Returns the sampled codes (B, num_codebooks * frame_stacking_factor),
+        (2B, ...) with CFG, where the unconditional half repeats the conditional codes.
         """
         self.local_transformer.reset_cache(use_cache=use_kv_cache)
         dec_output = dec_output.unsqueeze(1)  # (B, 1, E)
@@ -624,6 +686,8 @@ class LocalTransformerHelper:
                 codebook_logits.unsqueeze(1), self.codebook_size, forbid_audio_eos=forbid_audio_eos
             ).squeeze(1)
 
+            if mask_eos:
+                codebook_logits[:, self.audio_eos_id] = float('-inf')
             if frame_is_eos is not None:
                 codebook_logits[frame_is_eos] = float('-inf')
                 codebook_logits[frame_is_eos, self.audio_eos_id] = 0.0
@@ -651,12 +715,7 @@ class LocalTransformerHelper:
             next_local_transformer_input = self.local_transformer_in_projection(next_local_transformer_input)
             local_transformer_input = torch.cat([local_transformer_input, next_local_transformer_input], dim=1)
 
-        all_preds = torch.cat(all_preds, dim=1)  # (B, num_codebooks * frame_stacking_factor)
-        all_preds = all_preds.reshape(-1, self.frame_stacking_factor, self.num_audio_codebooks).permute(0, 2, 1)
-        if use_cfg:
-            all_preds = all_preds[:actual_batch_size]
-
-        return all_preds
+        return torch.cat(all_preds, dim=1)
 
     def sample_maskgit(
         self,

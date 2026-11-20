@@ -42,6 +42,7 @@ from nemo.collections.tts.modules.magpietts_modules import (
     EOSDetectionMethod,
     LocalTransformerHelper,
     LocalTransformerType,
+    STREAMING_EOS_DETECTION_METHODS,
     SpecialAudioToken,
     add_special_tokens,
 )
@@ -99,7 +100,8 @@ class StreamingConfig:
         phoneme_input_type: 'gt' or 'pred' for phoneme tokens.
         phoneme_sampling_method: 'argmax' or 'sample' for phoneme token selection.
         dummy_context_embedding_unconditional: Unconditional embedding for CFG (if enabled).
-        eos_detection_method: None (stop on EOS in any codebook) or 'multinomial_zero_cb' (see streaming_init).
+        eos_detection_method: None (stop on EOS in any codebook), 'multinomial_zero_cb' or 'multinomial_majority'
+            (see streaming_init).
     """
 
     batch_size: int
@@ -1478,10 +1480,12 @@ class EasyMagpieTTSInferenceModel(ModelPT):
         use_cfg: bool,
         cfg_scale: float,
         zero_cb_eos: bool = False,
+        majority_eos: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sample audio codes from logits using either local transformer or parallel sampling.
-        ``zero_cb_eos`` (local transformer only) selects the 'multinomial_zero_cb' EOS rule.
+        ``zero_cb_eos`` / ``majority_eos`` (local transformer only) select the 'multinomial_zero_cb' /
+        'multinomial_majority' EOS rule.
 
         Returns:
             audio_codes_next: Sampled codes with temperature/topk (B, num_codebooks)
@@ -1498,6 +1502,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
                     use_kv_cache=False,
                     sanitize_logits=True,
                     zero_cb_eos=zero_cb_eos,
+                    majority_eos=majority_eos,
                 )
                 # Base class returns (B, C, S); flatten to (B, C*S) for downstream code
                 audio_codes_next = audio_codes_next.permute(0, 2, 1)
@@ -1586,12 +1591,13 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             gt_audio_codes_lens: Lengths of GT audio codes (B,) after stacking.
             eos_detection_method: None (default) stops on EOS in any codebook. 'multinomial_zero_cb' lets the code
                 sampled at local-transformer index 0 decide whether a frame is EOS (see
-                LocalTransformerHelper.sample_autoregressive); requires use_local_transformer.
+                LocalTransformerHelper.sample_autoregressive); 'multinomial_majority' ends a frame when more than half
+                of its sampled local-transformer codes are EOS. Both require use_local_transformer.
 
         Returns:
             StreamingState: Initial state for streaming inference.
         """
-        if eos_detection_method not in (None, EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value):
+        if eos_detection_method not in STREAMING_EOS_DETECTION_METHODS:
             raise ValueError(f"Unsupported eos_detection_method for streaming inference: {eos_detection_method}")
         if eos_detection_method is not None and not use_local_transformer:
             raise ValueError(f"eos_detection_method={eos_detection_method} requires use_local_transformer=True")
@@ -2289,6 +2295,7 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             use_cfg=state.config.use_cfg,
             cfg_scale=state.config.cfg_scale,
             zero_cb_eos=state.config.eos_detection_method == EOSDetectionMethod.MULTINOMIAL_ZERO_CB.value,
+            majority_eos=state.config.eos_detection_method == EOSDetectionMethod.MULTINOMIAL_MAJORITY.value,
         )
 
         return audio_codes_next, all_codes_next_argmax

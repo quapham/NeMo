@@ -1373,7 +1373,8 @@ def _add_easy_magpie_args(parser: argparse.ArgumentParser) -> None:
     longform = parser.add_argument_group(
         'Long-form chunked inference (--easy_magpie_inference_mode longform_chunked; batch_size 1). '
         'The EOS rule is --eos_detection_method: unset = stop on EOS in any codebook, '
-        'multinomial_zero_cb = the code sampled for codebook 0 decides (needs --use_local_transformer).'
+        'multinomial_zero_cb = the code sampled for codebook 0 decides, multinomial_majority = more than half of '
+        'the sampled codes of a frame decide (both need --use_local_transformer).'
     )
     longform.add_argument(
         '--longform_chunk_words',
